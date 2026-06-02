@@ -162,19 +162,3 @@ grant it for normal personal use.
 - The script only asks for read access (`activity:read_all`, including private
   activities). It never changes anything on your Strava account.
 
-## How it's built
-
-It's a single file, `strava_export.py`, with four clearly separated parts: the
-login flow (`StravaAuth`), the API client (`StravaClient`), the Markdown
-formatting, and the command-line glue (`main`). No database, no server, two
-dependencies.
-
-## License
-
-[MIT](LICENSE) © Roman Struchev
-
-## A note on Strava
-
-This project isn't affiliated with or endorsed by Strava. "Strava" is a
-trademark of Strava, Inc. Using the Strava API is subject to the
-[Strava API Agreement](https://www.strava.com/legal/api).
