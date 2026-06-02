@@ -1,11 +1,7 @@
-# Strava → LLM
+# Strava exporter to LLM
 
 **Export all your [Strava](https://www.strava.com) activities to clean Markdown,
 then analyze your training just by chatting with ChatGPT, Claude, or any other LLM.**
-
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
-![GitHub stars](https://img.shields.io/github/stars/roman-struchev/strava-to-llm?style=social)
 
 For each activity it grabs the full details — per-kilometer splits, heart-rate
 zones, power, cadence, elevation, laps, gear and your notes — so the model has
