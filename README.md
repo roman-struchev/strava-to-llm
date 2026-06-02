@@ -31,6 +31,14 @@ export/
 the full details of each one. The `activities/` folder has the same thing split
 into one file per workout, in case the combined file is too big for your chat.
 
+Here's the summary table at the top of `all_activities.md`:
+
+![The overview table in all_activities.md](screenshots/activities_all.png)
+
+And here's a single activity — metrics, per-kilometer splits, laps and zones:
+
+![A single activity with splits](screenshots/activity.png)
+
 ## What you need
 
 - Python 3.10 or newer
@@ -49,8 +57,8 @@ into one file per workout, in case the combined file is too big for your chat.
 ### 2. Install
 
 ```bash
-git clone https://github.com/roman-struchev/strava-exporter.git
-cd strava-exporter
+git clone https://github.com/roman-struchev/strava-to-llm.git
+cd strava-to-llm
 
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
