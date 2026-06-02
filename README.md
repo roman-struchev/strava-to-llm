@@ -1,11 +1,15 @@
-# Strava exported to markdown
+# Strava → LLM
 
-A small script that downloads all your [Strava](https://www.strava.com)
-activities and saves them as Markdown files — so you can drop them into
-ChatGPT, Claude, or any other chat and ask questions about your training.
+**Export all your [Strava](https://www.strava.com) activities to clean Markdown,
+then analyze your training just by chatting with ChatGPT, Claude, or any other LLM.**
 
-For each activity it grabs the details: per-kilometer splits, heart-rate zones,
-power, cadence, elevation, laps, gear and your notes.
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![GitHub stars](https://img.shields.io/github/stars/roman-struchev/strava-to-llm?style=social)
+
+For each activity it grabs the full details — per-kilometer splits, heart-rate
+zones, power, cadence, elevation, laps, gear and your notes — so the model has
+real numbers to reason about, not just a summary.
 
 ## Why Markdown?
 
