@@ -1,4 +1,4 @@
-# Strava exporter to LLM
+# Strava to LLM
 
 **Export all your [Strava](https://www.strava.com) activities to clean Markdown,
 then analyze your training just by chatting with ChatGPT, Claude, or any other LLM.**
