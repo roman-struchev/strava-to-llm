@@ -1,50 +1,52 @@
-# strava-exporter
+# Strava exported to markdown
 
-Export all your [Strava](https://www.strava.com) activities — with full detail —
-into clean **Markdown that you can paste or upload into an LLM chat**
-(ChatGPT, Claude, Gemini, …) for manual training analysis.
+A small script that downloads all your [Strava](https://www.strava.com)
+activities and saves them as Markdown files — so you can drop them into
+ChatGPT, Claude, or any other chat and ask questions about your training.
 
-It pulls every activity from your profile, fetches per-activity details
-(splits per km, heart-rate zones, power, cadence, elevation, laps, gear, notes),
-and writes them as human- and model-readable Markdown.
+For each activity it grabs the details: per-kilometer splits, heart-rate zones,
+power, cadence, elevation, laps, gear and your notes.
 
 ## Why Markdown?
 
-LLMs parse Markdown tables and headings reliably and cheaply. Instead of
-dumping raw JSON into a chat, you get a structured document you can drop in and
-ask things like *"compare my pacing in April vs May"* or *"is my aerobic base
-improving — look at HR drift across long runs"*.
+Because chat models read Markdown tables and headings well. Pasting raw JSON
+into a chat works badly; a tidy Markdown file works great. Then you can just
+ask things like *"compare my pace in April and May"* or *"is my heart rate
+drifting less on long runs than it used to?"*.
 
-## Features
+## What you get
 
-- 🔐 **One-click OAuth** — opens your browser, captures the redirect on
-  `localhost`, and caches tokens so you only log in once.
-- 📋 **Full detail** — distance, moving/elapsed time, pace/speed, avg & max HR,
-  power, cadence, elevation gain, calories, gear, description, **per-km splits**,
-  **heart-rate / power zone distribution**, and **laps**.
-- 📄 **Two outputs** — one combined `all_activities.md` (great for a single
-  upload) plus one file per activity under `export/activities/`.
-- ⚡ **Caching** — raw API responses are cached on disk, so re-runs are fast and
-  don't waste your API quota.
-- 🚦 **Rate-limit aware** — respects Strava's 100-requests/15-min limit and
-  backs off automatically.
-- 🧰 **One file, two dependencies** — a single `strava_export.py` script, no
-  database, no server.
+After a run you'll have:
 
-## Requirements
+```
+export/
+├── all_activities.md          # everything in one file — upload this one
+└── activities/
+    ├── 2024-05-12-123456-morning-run.md
+    ├── 2024-05-10-123001-tempo-intervals.md
+    └── ...
+```
 
-- Python 3.10+
-- A Strava account and a (free) Strava API application
-- Two Python packages: `requests` and `python-dotenv`
+`all_activities.md` starts with a summary table of every activity, followed by
+the full details of each one. The `activities/` folder has the same thing split
+into one file per workout, in case the combined file is too big for your chat.
 
-## 1. Create a Strava API application
+## What you need
 
-1. Go to **<https://www.strava.com/settings/api>**.
-2. Create an application (any name/website works for personal use).
-3. Set **Authorization Callback Domain** to exactly: `localhost`
-4. Note your **Client ID** and **Client Secret**.
+- Python 3.10 or newer
+- A Strava account
+- A free Strava API application (takes two minutes to create — see below)
 
-## 2. Install
+## Setup
+
+### 1. Create a Strava API application
+
+1. Open <https://www.strava.com/settings/api>.
+2. Create an application. Any name and website will do.
+3. Set **Authorization Callback Domain** to exactly `localhost`.
+4. Copy your **Client ID** and **Client Secret** — you'll need them next.
+
+### 2. Install
 
 ```bash
 git clone https://github.com/roman-struchev/strava-exporter.git
@@ -56,144 +58,123 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## 3. Configure credentials
+### 3. Add your credentials
+
+Copy the example file and paste in your Client ID and Secret:
 
 ```bash
 cp .env.example .env
 ```
-
-Edit `.env` and fill in your Strava app credentials:
 
 ```dotenv
 STRAVA_CLIENT_ID=12345
 STRAVA_CLIENT_SECRET=abcdef0123456789...
 ```
 
-## 4. Run
+### 4. Run it
 
 ```bash
 python strava_export.py
 ```
 
-On first run a browser window opens asking you to authorize access to your
-activities. Approve it; the script catches the redirect, exchanges the code for
-tokens, and starts exporting. Tokens are saved in `cache/tokens.json` and
-refreshed automatically afterwards.
+The first time, your browser opens and asks you to allow access to your Strava
+activities. Click approve — the script catches the response, saves a login token
+in `cache/tokens.json`, and starts downloading. After that it logs in on its own,
+so you only do this once.
 
-Output:
+## Using it with a chat model
 
-```
-export/
-├── all_activities.md          # overview table + every activity (upload this)
-└── activities/
-    ├── 2024-05-12-123456-morning-run.md
-    ├── 2024-05-10-123001-tempo-intervals.md
-    └── ...
-```
+Upload `export/all_activities.md` to ChatGPT, Claude, etc. (or paste a few files
+from `export/activities/`), then ask away. For example:
 
-## 5. Analyze with an LLM
+- *"Summarize my training over the last 4 weeks. Any signs I'm overdoing it?"*
+- *"Look at my long runs — is my heart-rate drift getting better?"*
+- *"Make a week-by-week mileage table and point out the biggest jumps."*
 
-Upload `export/all_activities.md` (or paste a few activity files) into your
-chat model and ask away. Example prompts:
+If your chat has a small context limit, the combined file might be too large —
+upload individual files from `export/activities/`, or export just a recent
+window with `--after`.
 
-- *"Summarize my training load over the last 4 weeks. Any signs of overtraining?"*
-- *"Look at my long runs and tell me if my heart-rate drift is improving."*
-- *"Build a week-by-week mileage table and flag the biggest jumps."*
-
-> 💡 The combined file can get large. If your chat has a small context window,
-> upload individual files from `export/activities/` or use `--after` to export
-> a recent window.
-
-## Usage / options
+## Options
 
 ```text
 python strava_export.py [options]
 
-  -o, --output DIR        Output directory for Markdown (default: ./export)
-      --cache DIR         Directory for cached JSON and tokens (default: ./cache)
-      --after YYYY-MM-DD   Only activities on/after this date
+  -o, --output DIR        Where to write the Markdown (default: ./export)
+      --cache DIR         Where to keep cached data and your login token (default: ./cache)
+      --after YYYY-MM-DD   Only activities on or after this date
       --before YYYY-MM-DD  Only activities before this date
-      --limit N           Stop after N activities (newest first)
-      --refresh           Re-fetch details even if cached
-      --summary-only      Use only the activity list (~6 requests, instant);
-                          no splits/zones/laps
-      --no-zones          Skip the per-activity heart-rate/power zones request
-      --no-per-activity   Write only the combined file
-      --port N            Local OAuth callback port (default: 8721)
-  -v, --verbose           Verbose logging
+      --limit N           Only the N most recent activities
+      --refresh           Download again even if it's already cached
+      --summary-only      Quick mode: just the activity list, no splits/zones/laps
+      --no-zones          Skip heart-rate/power zones (downloads twice as fast)
+      --no-per-activity   Only write the combined file
+      --port N            Port for the login redirect (default: 8721)
+  -v, --verbose           Show more logging
 ```
 
-Examples:
+A few handy examples:
 
 ```bash
-# Fast first pass over everything: overview + basic stats in seconds
+# Quick overview of everything in a few seconds
 python strava_export.py --summary-only
 
-# Only this year, fresh data
+# Just this year, fresh data
 python strava_export.py --after 2026-01-01 --refresh
 
-# Quick test with the 10 most recent activities
+# Try it out on your 10 latest activities
 python strava_export.py --limit 10
 ```
 
-## How it works
+## Why it can be slow (and what to do)
 
-```
-your browser ──auth──▶ Strava OAuth ──tokens──▶ cache/tokens.json
-                                                      │ (auto-refreshed)
-python strava_export.py                               ▼
-   ──▶ GET /athlete/activities (paged)        StravaAuth + StravaClient
-   ──▶ GET /activities/{id}                          │  (rate-limited)
-   ──▶ GET /activities/{id}/zones                     ▼
-                  cache/activity_*.json ──▶ Markdown formatter ──▶ export/*.md
-```
+The script isn't the bottleneck — Strava is. A new API app is allowed only
+**100 requests every 15 minutes** and **1000 per day**. Each activity needs one
+or two requests, so if you have a thousand-plus activities, a full export simply
+can't finish in a single day. That's a Strava rule, not a bug, and running it in
+parallel wouldn't help — you'd just spend the time waiting for the quota anyway.
 
-Everything lives in one file, `strava_export.py`, split into clearly-labelled
-sections: OAuth (`StravaAuth`), the API client (`StravaClient`), the Markdown
-formatter, and the CLI orchestration (`main`).
+The script handles this for you:
 
-## Privacy & security
+- **It remembers what it already downloaded.** When the daily limit runs out, it
+  stops cleanly, writes the file with whatever it has so far, and tells you to
+  run it again later. Next time it skips everything it already has and picks up
+  where it left off.
+- **It skips unnecessary requests.** Heart-rate zones are only fetched for
+  activities that actually have a heart rate. Use `--no-zones` to skip them
+  completely and roughly halve the work.
+- **There's a fast mode.** `--summary-only` uses just the activity list — about
+  six requests total — and finishes in seconds. You lose splits, zones and laps,
+  but you get distance, time, pace, average heart rate and elevation for every
+  activity. Good for a first look.
 
-- Your data **never leaves your machine** except for the calls you make to the
-  Strava API. The exported files are written locally; what you later upload to
-  an LLM is your choice.
-- `.env`, `cache/` (tokens + raw data) and `export/` are **git-ignored** by
-  default — don't commit your tokens or activities.
-- Token files are written with `0600` permissions.
-- The app requests the `activity:read_all` scope (read-only, including private
-  activities). It never writes to or modifies your Strava account.
+If you want it genuinely faster, you can ask Strava to raise your app's limit on
+the [API settings page](https://www.strava.com/settings/api) — they usually
+grant it for normal personal use.
 
-## Performance & rate limits
+## Your data stays yours
 
-The speed limit here is **Strava's API quota, not the script.** A new Strava app
-gets **100 requests / 15 min** and **1000 / day**. In full-detail mode each
-activity costs 1–2 requests (detail, plus zones when the activity has heart-rate
-data), so a large history is inherently a multi-window — and for thousands of
-activities, multi-*day* — job. Parallelism can't help: you spend most of the
-time waiting on the quota, not on the network.
+- Nothing is sent anywhere except to Strava to fetch your own data. The files
+  are written to your computer. Whatever you later upload to a chat is your call.
+- `.env`, the `cache/` folder (token + downloaded data) and `export/` are all in
+  `.gitignore`, so you won't accidentally commit your token or your activities.
+- The login token file is saved with `0600` permissions (only you can read it).
+- The script only asks for read access (`activity:read_all`, including private
+  activities). It never changes anything on your Strava account.
 
-What the tool does about it:
+## How it's built
 
-- **Caching + resume.** Every fetched activity is cached on disk. When the daily
-  quota is hit the run stops cleanly, writes the combined file from what it has,
-  and tells you to re-run later — the next run skips everything already cached.
-- **Fewer requests.** Zones are fetched only for activities that actually have
-  heart-rate data; `--no-zones` skips them entirely (roughly halves the calls).
-- **`--summary-only`.** The activity *list* already contains distance, time,
-  pace, avg/max HR and elevation. This mode uses only that (~6 requests total)
-  and finishes in seconds for any number of activities — great for a first pass
-  or when you don't need splits/zones/laps.
-
-**Tip:** to go faster overall, request a rate-limit increase for your app on the
-[Strava developer page](https://www.strava.com/settings/api) — Strava grants
-higher limits to legitimate apps on request.
+It's a single file, `strava_export.py`, with four clearly separated parts: the
+login flow (`StravaAuth`), the API client (`StravaClient`), the Markdown
+formatting, and the command-line glue (`main`). No database, no server, two
+dependencies.
 
 ## License
 
 [MIT](LICENSE) © Roman Struchev
 
-## Disclaimer
+## A note on Strava
 
-This project is not affiliated with or endorsed by Strava. "Strava" is a
-trademark of Strava, Inc. Use of the Strava API is subject to the
+This project isn't affiliated with or endorsed by Strava. "Strava" is a
+trademark of Strava, Inc. Using the Strava API is subject to the
 [Strava API Agreement](https://www.strava.com/legal/api).
