@@ -493,20 +493,41 @@ def main(argv: list[str] | None = None) -> int:
         per_dir.mkdir(parents=True, exist_ok=True)
 
     detailed, sections = [], []
-    for i, summary in enumerate(summaries, start=1):
-        detail, zones = load_detail(client, summary, cache_dir, args.refresh)
-        detailed.append(detail)
-        md = render_activity(detail, zones)
+    stopped_early = False
+
+    def emit(activity: dict, zones: list) -> None:
+        md = render_activity(activity, zones)
+        detailed.append(activity)
         sections.append(md)
         if not args.no_per_activity:
-            (per_dir / activity_filename(detail)).write_text(md)
-        log.info("  [%d/%d] %s", i, len(summaries), detail.get("name", "?"))
+            (per_dir / activity_filename(activity)).write_text(md)
 
+    try:
+        for i, summary in enumerate(summaries, start=1):
+            if args.summary_only:
+                emit(summary, [])
+                continue
+            fetch_zones = not args.no_zones and bool(summary.get("has_heartrate"))
+            detail, zones = load_detail(client, summary, cache_dir, args.refresh, fetch_zones)
+            emit(detail, zones)
+            log.info("  [%d/%d] %s", i, len(summaries), detail.get("name", "?"))
+    except DailyLimitReached:
+        stopped_early = True
+        log.warning("\n⏳ Strava daily API quota reached after %d/%d activities.",
+                    len(detailed), len(summaries))
+        log.warning("   Progress is cached — just re-run the same command tomorrow to continue.")
+    except KeyboardInterrupt:
+        stopped_early = True
+        log.warning("\n⏹  Interrupted after %d/%d activities. Re-run to resume (cached).",
+                    len(detailed), len(summaries))
+
+    # Always write the combined file from whatever we have, so a partial run is usable.
     combined = render_overview(athlete, detailed) + "\n---\n\n" + "\n\n---\n\n".join(sections) + "\n"
     combined_path = out_dir / "all_activities.md"
     combined_path.write_text(combined)
 
-    print(f"\n✔ Exported {len(detailed)} activities.")
+    print(f"\n{'⏸ Partial export' if stopped_early else '✔ Exported'}: "
+          f"{len(detailed)}/{len(summaries)} activities.")
     print(f"  Combined file: {combined_path}")
     if not args.no_per_activity:
         print(f"  Per-activity:  {per_dir}/ ({len(detailed)} files)")

@@ -115,6 +115,9 @@ python strava_export.py [options]
       --before YYYY-MM-DD  Only activities before this date
       --limit N           Stop after N activities (newest first)
       --refresh           Re-fetch details even if cached
+      --summary-only      Use only the activity list (~6 requests, instant);
+                          no splits/zones/laps
+      --no-zones          Skip the per-activity heart-rate/power zones request
       --no-per-activity   Write only the combined file
       --port N            Local OAuth callback port (default: 8721)
   -v, --verbose           Verbose logging
@@ -123,6 +126,9 @@ python strava_export.py [options]
 Examples:
 
 ```bash
+# Fast first pass over everything: overview + basic stats in seconds
+python strava_export.py --summary-only
+
 # Only this year, fresh data
 python strava_export.py --after 2026-01-01 --refresh
 
@@ -157,12 +163,30 @@ formatter, and the CLI orchestration (`main`).
 - The app requests the `activity:read_all` scope (read-only, including private
   activities). It never writes to or modifies your Strava account.
 
-## Rate limits
+## Performance & rate limits
 
-Strava's default limits are 100 requests / 15 min and 1000 / day. Each activity
-costs ~2 requests (detail + zones). The client throttles and retries
-automatically; thanks to caching, only new activities are fetched on re-runs.
-Very large histories may pause briefly when a 15-minute window is exhausted.
+The speed limit here is **Strava's API quota, not the script.** A new Strava app
+gets **100 requests / 15 min** and **1000 / day**. In full-detail mode each
+activity costs 1–2 requests (detail, plus zones when the activity has heart-rate
+data), so a large history is inherently a multi-window — and for thousands of
+activities, multi-*day* — job. Parallelism can't help: you spend most of the
+time waiting on the quota, not on the network.
+
+What the tool does about it:
+
+- **Caching + resume.** Every fetched activity is cached on disk. When the daily
+  quota is hit the run stops cleanly, writes the combined file from what it has,
+  and tells you to re-run later — the next run skips everything already cached.
+- **Fewer requests.** Zones are fetched only for activities that actually have
+  heart-rate data; `--no-zones` skips them entirely (roughly halves the calls).
+- **`--summary-only`.** The activity *list* already contains distance, time,
+  pace, avg/max HR and elevation. This mode uses only that (~6 requests total)
+  and finishes in seconds for any number of activities — great for a first pass
+  or when you don't need splits/zones/laps.
+
+**Tip:** to go faster overall, request a rate-limit increase for your app on the
+[Strava developer page](https://www.strava.com/settings/api) — Strava grants
+higher limits to legitimate apps on request.
 
 ## License
 
