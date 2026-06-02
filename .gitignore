@@ -1,0 +1,30 @@
+# Secrets & credentials
+.env
+cache/
+*.tokens.json
+tokens.json
+
+# Exported data (your personal activities)
+export/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.Python
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
