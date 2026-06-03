@@ -1,6 +1,6 @@
 """Multi-user web API around the exporter, meant to be called by a ChatGPT action.
 
-    GET /activities?clientId=...&after=YYYY-MM-DD  ->  that user's activities as Markdown
+    GET /export?clientId=...&after=YYYY-MM-DD  ->  that user's activities as Markdown
 
 Each user brings their own Strava API app. On the home page they enter their
 Client ID + Secret and click "Connect Strava"; the secret and OAuth tokens are
@@ -107,52 +107,85 @@ def _collect(client_id: str, after: int | None, before: int | None, limit: int |
 
 # -- routes -----------------------------------------------------------------
 
-_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Strava to LLM</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 48px auto; line-height: 1.6;">
-<h1>Strava&nbsp;&rarr;&nbsp;LLM</h1>
+_REPO_URL = "https://github.com/roman-struchev/strava-to-llm"
+
+_GITHUB_LINK = f"""<p><a class="gh" href="{_REPO_URL}" target="_blank" rel="noopener">
+  <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+  </svg>View on GitHub</a></p>"""
+
+_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Strava to LLM</title>
+<style>
+ body{font-family:system-ui,-apple-system,sans-serif;max-width:560px;margin:64px auto;padding:0 20px;line-height:1.6;color:#1a1a1a}
+ h2{font-weight:600}
+ input{width:100%;padding:11px 12px;margin:6px 0;border:1px solid #ddd;border-radius:8px;font-size:15px;box-sizing:border-box}
+ input:focus{outline:none;border-color:#fc4c02}
+ button{padding:11px 22px;background:#fc4c02;color:#fff;border:0;border-radius:8px;font-size:15px;cursor:pointer}
+ button:hover{background:#e34402}
+ a{color:#fc4c02}
+ .logout{margin-left:auto;padding:6px 12px;border:1px solid #ddd;border-radius:6px;color:#666;text-decoration:none;font-size:13px;white-space:nowrap}
+ .logout:hover{border-color:#fc4c02;color:#fc4c02}
+ .avatar{width:56px;height:56px;border-radius:50%;object-fit:cover}
+ .ex{list-style:none;padding:0;margin:0}
+ .ex li{margin:12px 0}
+ .ex a{word-break:break-all}
+ code{background:#f4f4f4;padding:1px 5px;border-radius:4px}
+ table{border-collapse:collapse;margin:14px 0}
+ td{padding:4px 20px 4px 0}td:first-child{color:#888}
+ .muted{color:#888;font-size:14px}
+ .gh{display:inline-flex;align-items:center;gap:7px;color:#888;text-decoration:none;font-size:14px;margin-top:44px}
+ .gh:hover{color:#1a1a1a}
+</style></head><body>
 {body}
 </body></html>"""
 
 
 def _login_page(cid: str) -> str:
-    body = f"""<p>Connect your Strava account to export your activities.</p>
-    <p>Enter your Strava API app credentials
-      (<a href="https://www.strava.com/settings/api" target="_blank">create one here</a> —
+    body = f"""<h2>Connect Strava</h2>
+    <p>Export your activities and analyze your training with an LLM. Enter your Strava API app
+      credentials (<a href="https://www.strava.com/settings/api" target="_blank">create one here</a> —
       set the callback domain to this server's host):</p>
     <form action="/register" method="post">
-      <p><input name="client_id" placeholder="Client ID" value="{cid}" required style="width:100%; padding:8px;"></p>
-      <p><input name="client_secret" placeholder="Client Secret" required style="width:100%; padding:8px;"></p>
-      <p><button type="submit" style="padding:10px 18px; background:#fc4c02; color:#fff;
-         border:0; border-radius:6px; cursor:pointer;">Connect Strava</button></p>
-    </form>"""
-    return _PAGE.format(body=body)
+      <input name="client_id" placeholder="Client ID" value="{cid}" required>
+      <input name="client_secret" placeholder="Client Secret" required>
+      <p><button type="submit">Connect Strava</button></p>
+    </form>
+    {_GITHUB_LINK}"""
+    return _PAGE.replace("{body}", body)
 
 
 def _profile_page(cid: str, athlete: dict | None, base_url: str) -> str:
-    week_ago = (date.today() - timedelta(days=7)).isoformat()
-    example = f"{base_url}/activities?clientId={cid}&after={week_ago}"
+    today = date.today()
+    base = f"{base_url}/export?clientId={cid}"
+    examples = [
+        ("Last activity only", f"{base}&limit=1"),
+        ("Last week", f"{base}&after={(today - timedelta(days=7)).isoformat()}"),
+        ("This year", f"{base}&after={today.year}-01-01"),
+    ]
+    links = "".join(f'<li><b>{label}</b><br><a href="{url}">{url}</a></li>' for label, url in examples)
+    logout = '<a class="logout" href="/logout">Log out</a>'
+
     if athlete:
         name = " ".join(filter(None, [athlete.get("firstname"), athlete.get("lastname")])) or "—"
-        location = ", ".join(filter(None, [athlete.get("city"), athlete.get("country")])) or "—"
-        weight = f'{athlete.get("weight")} kg' if athlete.get("weight") else "—"
-        rows = [("Name", name), ("Athlete ID", athlete.get("id")), ("Client ID", cid),
-                ("Location", location), ("Sex", athlete.get("sex") or "—"), ("Weight", weight)]
-        table = "".join(f"<tr><td style='color:#666; padding:2px 16px 2px 0'>{k}</td>"
-                        f"<td><b>{v}</b></td></tr>" for k, v in rows)
-        who = f"<table>{table}</table>"
+        avatar = athlete.get("profile") or athlete.get("profile_medium") or ""
+        img = f'<img class="avatar" src="{avatar}" alt="">' if avatar.startswith("http") else ""
+        header = f"""<div style="display:flex;align-items:center;gap:14px;">{img}
+      <div><div style="font-size:22px;font-weight:600;">{name}</div>
+        <div class="muted">Athlete {athlete.get("id")} · Client {cid}</div></div>{logout}</div>"""
     else:
-        who = "<p>Connected, but the profile couldn't be loaded — the token may need reconnecting.</p>"
-    body = f"""<p>✅ Connected to Strava.</p>
-    {who}
-    <p style="margin-top:24px;">Example — your last week of training:</p>
-    <p><a href="{example}">{example}</a></p>
-    <p style="color:#666;">Change the <code>after</code> date for other ranges.
-      <a href="/?new=1">Connect a different account</a>.</p>"""
-    return _PAGE.format(body=body)
+        header = (f'<div style="display:flex;align-items:center;"><div><h2>Connected to Strava</h2>'
+                  '<p class="muted">Profile couldn\'t be loaded — the token may need reconnecting.</p>'
+                  f"</div>{logout}</div>")
+
+    body = f"""{header}
+    <p style="margin-top:28px;">Example links — open one, or hand it to your LLM:</p>
+    <ul class="ex">{links}</ul>"""
+    return _PAGE.replace("{body}", body)
 
 
 async def index(request: web.Request) -> web.Response:
-    cid = request.query.get("clientId") or DEFAULT_CLIENT_ID or ""
+    cid = request.query.get("clientId") or request.cookies.get("clientId") or DEFAULT_CLIENT_ID or ""
     if cid and _connected(cid) and not request.query.get("new"):
         try:
             athlete = await asyncio.to_thread(lambda: StravaClient(_auth_for(cid)).get_athlete())
@@ -198,10 +231,19 @@ async def callback(request: web.Request) -> web.Response:
     if not client_id:
         raise web.HTTPBadRequest(text="Missing state (clientId).")
     _auth_for(client_id).authorize_with_code(request.query["code"])  # writes data/users/<id>/tokens.json
-    raise web.HTTPFound(f"/?clientId={client_id}")
+    resp = web.HTTPFound("/")
+    resp.set_cookie("clientId", client_id, max_age=31536000, httponly=True, samesite="Lax")
+    raise resp
 
 
-async def activities(request: web.Request) -> web.Response:
+async def logout(request: web.Request) -> web.Response:
+    """Clear the saved clientId cookie and show the login page."""
+    resp = web.HTTPFound("/?new=1")  # ?new=1 forces the login form even if a default user is set
+    resp.del_cookie("clientId")
+    raise resp
+
+
+async def export(request: web.Request) -> web.Response:
     client_id = request.query.get("clientId") or DEFAULT_CLIENT_ID
     if not client_id:
         raise web.HTTPBadRequest(text="clientId is required.")
@@ -233,8 +275,9 @@ def make_app() -> web.Application:
         web.get("/", index),
         web.post("/register", register),
         web.get("/login", login),
+        web.get("/logout", logout),
         web.get("/callback", callback),
-        web.get("/activities", activities),
+        web.get("/export", export),
         web.get("/health", health),
     ])
     return app

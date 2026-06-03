@@ -106,55 +106,27 @@ If your chat has a small context limit, the combined file might be too large —
 upload individual files from the `activities/` folder, or export just a recent
 window with `--after`.
 
-## Optional: web server (for a ChatGPT action)
+## Try it online
 
-There's also a tiny web server so a model can fetch your activities on its own —
-for example as a [ChatGPT custom GPT action](https://platform.openai.com/docs/actions).
-It's multi-user: each person brings their own Strava API app. It exposes one
-endpoint:
+A hosted instance runs at **<https://strava.struchev.site>** — connect your
+Strava app there and use it right away, no install needed.
 
-```
-GET /activities?clientId=YOUR_ID&after=YYYY-MM-DD   ->   the same Markdown, as text
-                 &before=YYYY-MM-DD
-                 &limit=N
-```
+![Connect page](screenshots/login.png)
 
-Run it locally:
+## Optional: web server (for a ChatGPT/Claude data fetch)
 
-```bash
-python server.py
-```
-
-Open <http://localhost:8000>, enter your Strava **Client ID** and **Client
-Secret**, and click **Connect Strava**. You authorize in the browser once; the
-server stores the secret and tokens per user under `data/users/<clientId>/` and
-refreshes the tokens on its own from then on — nothing to copy by hand. The page
-then shows your profile and a ready-made link for your last week of training.
-After that, every request just carries your `clientId`:
+`server.py` is a small multi-user web app (the same one hosted above) so a model
+can fetch your activities itself. Open the page, enter your Strava **Client ID**
+and **Secret**, click **Connect Strava** — it authorizes once and stores your
+tokens server-side. Then one endpoint returns the Markdown:
 
 ```
-http://localhost:8000/activities?clientId=YOUR_ID&after=2026-01-01
+GET /export?clientId=YOUR_ID&after=YYYY-MM-DD[&before=...&limit=N]
 ```
 
-For this to work, the **Authorization Callback Domain** of your Strava app must
-match where the server runs: `localhost` for local use, or your domain once
-deployed. The server figures out its own public URL from the request (and
-honours a reverse proxy's `X-Forwarded-Proto` / `X-Forwarded-Host`), so there's
-nothing else to configure.
-
-Everything lives under `data/`: the activity cache (`data/cache/`) is shared
-between users, while secrets, tokens and the latest report live per user under
-`data/users/<clientId>/`. If you set `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET`
-in the environment, that account is pre-registered and used as the default when
-no `clientId` is given.
-
-To use it from ChatGPT, point a custom GPT action at the `/activities` endpoint.
-Then you can just ask *"analyze my training since April"* and it fetches the data
-itself.
-
-There's a `Dockerfile`, a `docker-compose.yml` and a GitHub Actions workflow
-(`.github/workflows/deploy.yml`) if you want to build an image and deploy it —
-adjust the image name, host and secrets to your own.
+Run your own with `python server.py`, or deploy with the included `Dockerfile`,
+`docker-compose.yml` and GitHub Actions workflow. The only requirement: set your
+Strava app's **Authorization Callback Domain** to the host you run it on.
 
 ## Options
 
