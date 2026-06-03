@@ -108,10 +108,8 @@ window with `--after`.
 
 ## Try it online
 
-A hosted instance runs at **<https://strava.struchev.site>** — connect your
+A hosted instance runs at [strava.struchev.site|http://strava.struchev.site] — connect your
 Strava app there and use it right away, no install needed.
-
-![Connect page](screenshots/login.png)
 
 ## Optional: web server (for a ChatGPT/Claude data fetch)
 
