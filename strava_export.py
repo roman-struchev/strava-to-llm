@@ -42,6 +42,7 @@ RATE_WINDOW_SECONDS = 15 * 60
 class DailyLimitReached(Exception):
     """Raised when Strava's daily request quota is exhausted (resume tomorrow)."""
 
+
 # Sports measured by pace (time per distance) rather than speed.
 FOOT_SPORTS = {"Run", "TrailRun", "VirtualRun", "Walk", "Hike", "Wheelchair"}
 SWIM_SPORTS = {"Swim"}
@@ -87,18 +88,33 @@ class StravaAuth:
         self.port = port
         self.redirect_uri = f"http://localhost:{port}"
         self.session = session or requests.Session()
+        self._tokens: dict | None = None
 
     def get_access_token(self) -> str:
-        """Return a valid access token, running the OAuth flow if needed."""
-        tokens = self._load()
-        if tokens is None:
+        """Return a valid access token, running the OAuth flow if needed.
+
+        Tokens are cached in memory and only loaded/saved when they actually
+        change, so repeated API calls don't touch the disk every time.
+        """
+        if self._tokens is None:
+            self._tokens = self._load()
+        if self._tokens is None:
             log.info("No cached tokens — starting interactive authorization.")
-            tokens = self._exchange_code(self._capture_code())
-        elif time.time() >= tokens["expires_at"] - 60:  # refresh a minute early
+            self._tokens = self._exchange_code(self._capture_code())
+            self._save(self._tokens)
+        elif time.time() >= self._tokens["expires_at"] - 60:  # refresh a minute early
             log.info("Access token expired — refreshing.")
-            tokens = self._refresh(tokens["refresh_token"])
-        self._save(tokens)
-        return tokens["access_token"]
+            self._tokens = self._refresh(self._tokens["refresh_token"])
+            self._save(self._tokens)
+        return self._tokens["access_token"]
+
+    def authorize_with_code(self, code: str) -> None:
+        """Exchange an OAuth authorization code for tokens and persist them.
+
+        Used by the web server's /callback, which captures the code itself.
+        """
+        self._tokens = self._exchange_code(code)
+        self._save(self._tokens)
 
     def _load(self) -> dict | None:
         if not self.token_path.exists():
@@ -413,6 +429,11 @@ def render_overview(athlete: dict, activities: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_combined(athlete: dict, activities: list[dict], sections: list[str]) -> str:
+    """The full export: overview table followed by each activity's Markdown."""
+    return render_overview(athlete, activities) + "\n---\n\n" + "\n\n---\n\n".join(sections) + "\n"
+
+
 # ==========================================================================
 # Orchestration
 # ==========================================================================
@@ -426,6 +447,12 @@ def parse_date(value: str | None) -> int | None:
     except ValueError:
         raise SystemExit(f"Invalid date '{value}'. Use YYYY-MM-DD.")
     return int(dt.timestamp())
+
+
+def user_dir(data_dir: Path, client_id: str | None) -> Path:
+    """Per-user directory ``<data_dir>/users/<clientId>`` (clientId sanitized)."""
+    safe = "".join(c for c in str(client_id) if c.isalnum())
+    return data_dir / "users" / safe
 
 
 def load_detail(client: StravaClient, summary: dict, cache_dir: Path,
@@ -444,10 +471,8 @@ def load_detail(client: StravaClient, summary: dict, cache_dir: Path,
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Export your Strava activities into LLM-friendly Markdown.")
-    p.add_argument("-o", "--output", type=Path, default=Path("export"),
-                   help="Output directory for Markdown (default: ./export).")
-    p.add_argument("--cache", type=Path, default=Path("cache"),
-                   help="Directory for cached JSON and tokens (default: ./cache).")
+    p.add_argument("--data", type=Path, default=Path("data"),
+                   help="Root data directory for tokens, cache and reports (default: ./data).")
     p.add_argument("--after", help="Only activities on/after this date (YYYY-MM-DD).")
     p.add_argument("--before", help="Only activities before this date (YYYY-MM-DD).")
     p.add_argument("--limit", type=int, help="Stop after N activities (newest first).")
@@ -468,11 +493,14 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(message)s")
     load_dotenv()
 
-    cache_dir: Path = args.cache
+    data_dir: Path = args.data
+    cache_dir = data_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    auth = StravaAuth(os.getenv("STRAVA_CLIENT_ID"), os.getenv("STRAVA_CLIENT_SECRET"),
-                      token_path=cache_dir / "tokens.json", port=args.port)
+    client_id = os.getenv("STRAVA_CLIENT_ID")
+    out_dir = user_dir(data_dir, client_id)  # data/users/<clientId>/
+    auth = StravaAuth(client_id, os.getenv("STRAVA_CLIENT_SECRET"),
+                      token_path=out_dir / "tokens.json", port=args.port)
     client = StravaClient(auth)
 
     athlete = client.get_athlete()
@@ -486,7 +514,6 @@ def main(argv: list[str] | None = None) -> int:
             break
     log.info("Found %d activities. Fetching details…", len(summaries))
 
-    out_dir: Path = args.output
     per_dir = out_dir / "activities"
     out_dir.mkdir(parents=True, exist_ok=True)
     if not args.no_per_activity:
@@ -522,9 +549,8 @@ def main(argv: list[str] | None = None) -> int:
                     len(detailed), len(summaries))
 
     # Always write the combined file from whatever we have, so a partial run is usable.
-    combined = render_overview(athlete, detailed) + "\n---\n\n" + "\n\n---\n\n".join(sections) + "\n"
     combined_path = out_dir / "all_activities.md"
-    combined_path.write_text(combined)
+    combined_path.write_text(render_combined(athlete, detailed, sections))
 
     print(f"\n{'⏸ Partial export' if stopped_early else '✔ Exported'}: "
           f"{len(detailed)}/{len(summaries)} activities.")

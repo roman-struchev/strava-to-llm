@@ -1,11 +1,6 @@
-# Secrets & credentials
+# Secrets, tokens, cache and exported activities (all under data/)
 .env
-cache/
-*.tokens.json
-tokens.json
-
-# Exported data (your personal activities)
-export/
+data/
 
 # Python
 __pycache__/
