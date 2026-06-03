@@ -16,15 +16,17 @@ drifting less on long runs than it used to?"*.
 
 ## What you get
 
-After a run you'll have:
+After a run you'll have (everything lives under `data/`):
 
 ```
-export/
-├── all_activities.md          # everything in one file — upload this one
-└── activities/
-    ├── 2024-05-12-123456-morning-run.md
-    ├── 2024-05-10-123001-tempo-intervals.md
-    └── ...
+data/
+├── users/<your-client-id>/
+│   ├── all_activities.md       # everything in one file — upload this one
+│   ├── activities/             # one file per workout
+│   │   ├── 2024-05-12-123456-morning-run.md
+│   │   └── ...
+│   └── tokens.json             # your login token (kept private)
+└── cache/                      # raw API responses, reused on re-runs
 ```
 
 `all_activities.md` starts with a summary table of every activity, followed by
@@ -87,20 +89,21 @@ python strava_export.py
 
 The first time, your browser opens and asks you to allow access to your Strava
 activities. Click approve — the script catches the response, saves a login token
-in `cache/tokens.json`, and starts downloading. After that it logs in on its own,
-so you only do this once.
+under `data/users/<your-client-id>/`, and starts downloading. After that it logs
+in on its own, so you only do this once.
 
 ## Using it with a chat model
 
-Upload `export/all_activities.md` to ChatGPT, Claude, etc. (or paste a few files
-from `export/activities/`), then ask away. For example:
+Upload `all_activities.md` (under `data/users/<your-client-id>/`) to ChatGPT,
+Claude, etc. (or paste a few files from its `activities/` folder), then ask away.
+For example:
 
 - *"Summarize my training over the last 4 weeks. Any signs I'm overdoing it?"*
 - *"Look at my long runs — is my heart-rate drift getting better?"*
 - *"Make a week-by-week mileage table and point out the biggest jumps."*
 
 If your chat has a small context limit, the combined file might be too large —
-upload individual files from `export/activities/`, or export just a recent
+upload individual files from the `activities/` folder, or export just a recent
 window with `--after`.
 
 ## Optional: web server (for a ChatGPT action)
@@ -139,10 +142,11 @@ deployed. The server figures out its own public URL from the request (and
 honours a reverse proxy's `X-Forwarded-Proto` / `X-Forwarded-Host`), so there's
 nothing else to configure.
 
-The activity cache (`cache/`) is shared between users; secrets, tokens and the
-latest report live per user under `data/`. If you set `STRAVA_CLIENT_ID` /
-`STRAVA_CLIENT_SECRET` in the environment, that account is pre-registered and
-used as the default when no `clientId` is given.
+Everything lives under `data/`: the activity cache (`data/cache/`) is shared
+between users, while secrets, tokens and the latest report live per user under
+`data/users/<clientId>/`. If you set `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET`
+in the environment, that account is pre-registered and used as the default when
+no `clientId` is given.
 
 To use it from ChatGPT, point a custom GPT action at the `/activities` endpoint.
 Then you can just ask *"analyze my training since April"* and it fetches the data
@@ -157,8 +161,7 @@ adjust the image name, host and secrets to your own.
 ```text
 python strava_export.py [options]
 
-  -o, --output DIR        Where to write the Markdown (default: ./export)
-      --cache DIR         Where to keep cached data and your login token (default: ./cache)
+      --data DIR          Root for tokens, cache and reports (default: ./data)
       --after YYYY-MM-DD   Only activities on or after this date
       --before YYYY-MM-DD  Only activities before this date
       --limit N           Only the N most recent activities
@@ -213,7 +216,7 @@ grant it for normal personal use.
 
 - Nothing is sent anywhere except to Strava to fetch your own data. The files
   are written to your computer. Whatever you later upload to a chat is your call.
-- `.env`, the `cache/` folder (token + downloaded data) and `export/` are all in
+- `.env` and the whole `data/` folder (tokens, cache and reports) are in
   `.gitignore`, so you won't accidentally commit your token or your activities.
 - The login token file is saved with `0600` permissions (only you can read it).
 - The script only asks for read access (`activity:read_all`, including private

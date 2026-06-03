@@ -3,7 +3,7 @@ services:
     image: romanew/all:strava-to-llm
     restart: unless-stopped
     ports:
-      - "10004:8000"
+      - "11004:8000"
     environment:
       STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
       STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET}
