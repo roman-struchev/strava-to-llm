@@ -3,8 +3,8 @@
 **Export all your [Strava](https://www.strava.com) activities to clean Markdown,
 then analyze your training just by chatting with ChatGPT, Claude, or any other LLM.**
 
-For each activity it grabs the full details — per-kilometer splits, heart-rate
-zones, power, cadence, elevation, laps, gear and your notes — so the model has
+For each activity it grabs the full details - per-kilometer splits, heart-rate
+zones, power, cadence, elevation, laps, gear and your notes - so the model has
 real numbers to reason about, not just a summary.
 
 ## Why Markdown?
@@ -21,7 +21,7 @@ After a run you'll have (everything lives under `data/`):
 ```
 data/
 ├── users/<your-client-id>/
-│   ├── all_activities.md       # everything in one file — upload this one
+│   ├── all_activities.md       # everything in one file - upload this one
 │   ├── activities/             # one file per workout
 │   │   ├── 2024-05-12-123456-morning-run.md
 │   │   └── ...
@@ -37,7 +37,7 @@ Here's the summary table at the top of `all_activities.md`:
 
 ![The overview table in all_activities.md](screenshots/activities_all.png)
 
-And here's a single activity — metrics, per-kilometer splits, laps and zones:
+And here's a single activity - metrics, per-kilometer splits, laps and zones:
 
 ![A single activity with splits](screenshots/activity.png)
 
@@ -45,7 +45,7 @@ And here's a single activity — metrics, per-kilometer splits, laps and zones:
 
 - Python 3.10 or newer
 - A Strava account
-- A free Strava API application (takes two minutes to create — see below)
+- A free Strava API application (takes two minutes to create - see below)
 
 ## Setup
 
@@ -54,7 +54,7 @@ And here's a single activity — metrics, per-kilometer splits, laps and zones:
 1. Open <https://www.strava.com/settings/api>.
 2. Create an application. Any name and website will do.
 3. Set **Authorization Callback Domain** to exactly `localhost`.
-4. Copy your **Client ID** and **Client Secret** — you'll need them next.
+4. Copy your **Client ID** and **Client Secret** - you'll need them next.
 
 ### 2. Install
 
@@ -88,7 +88,7 @@ python strava_export.py
 ```
 
 The first time, your browser opens and asks you to allow access to your Strava
-activities. Click approve — the script catches the response, saves a login token
+activities. Click approve - the script catches the response, saves a login token
 under `data/users/<your-client-id>/`, and starts downloading. After that it logs
 in on its own, so you only do this once.
 
@@ -99,23 +99,23 @@ Claude, etc. (or paste a few files from its `activities/` folder), then ask away
 For example:
 
 - *"Summarize my training over the last 4 weeks. Any signs I'm overdoing it?"*
-- *"Look at my long runs — is my heart-rate drift getting better?"*
+- *"Look at my long runs - is my heart-rate drift getting better?"*
 - *"Make a week-by-week mileage table and point out the biggest jumps."*
 
-If your chat has a small context limit, the combined file might be too large —
+If your chat has a small context limit, the combined file might be too large -
 upload individual files from the `activities/` folder, or export just a recent
 window with `--after`.
 
 ## Try it online
 
-A hosted instance runs at [strava.struchev.site|http://strava.struchev.site] — connect your
+A hosted instance runs at [strava.struchev.site](http://strava.struchev.site) - connect your
 Strava app there and use it right away, no install needed.
 
 ## Optional: web server (for a ChatGPT/Claude data fetch)
 
 `server.py` is a small multi-user web app (the same one hosted above) so a model
 can fetch your activities itself. Open the page, enter your Strava **Client ID**
-and **Secret**, click **Connect Strava** — it authorizes once and stores your
+and **Secret**, click **Connect Strava** - it authorizes once and stores your
 tokens server-side. Then one endpoint returns the Markdown:
 
 ```
@@ -158,11 +158,11 @@ python strava_export.py --limit 10
 
 ## Why it can be slow (and what to do)
 
-The script isn't the bottleneck — Strava is. A new API app is allowed only
+The script isn't the bottleneck - Strava is. A new API app is allowed only
 **100 requests every 15 minutes** and **1000 per day**. Each activity needs one
 or two requests, so if you have a thousand-plus activities, a full export simply
 can't finish in a single day. That's a Strava rule, not a bug, and running it in
-parallel wouldn't help — you'd just spend the time waiting for the quota anyway.
+parallel wouldn't help - you'd just spend the time waiting for the quota anyway.
 
 The script handles this for you:
 
@@ -173,13 +173,13 @@ The script handles this for you:
 - **It skips unnecessary requests.** Heart-rate zones are only fetched for
   activities that actually have a heart rate. Use `--no-zones` to skip them
   completely and roughly halve the work.
-- **There's a fast mode.** `--summary-only` uses just the activity list — about
-  six requests total — and finishes in seconds. You lose splits, zones and laps,
+- **There's a fast mode.** `--summary-only` uses just the activity list - about
+  six requests total - and finishes in seconds. You lose splits, zones and laps,
   but you get distance, time, pace, average heart rate and elevation for every
   activity. Good for a first look.
 
 If you want it genuinely faster, you can ask Strava to raise your app's limit on
-the [API settings page](https://www.strava.com/settings/api) — they usually
+the [API settings page](https://www.strava.com/settings/api) - they usually
 grant it for normal personal use.
 
 ## Your data stays yours
