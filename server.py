@@ -225,8 +225,11 @@ async def login(request: web.Request) -> web.Response:
 
 async def callback(request: web.Request) -> web.Response:
     """Strava redirects here with a code; exchange it and store tokens for this user."""
-    if request.query.get("error") or not request.query.get("code"):
-        raise web.HTTPBadRequest(text=f"Authorization failed: {request.query.get('error') or 'no code'}")
+    error = request.query.get("error")
+    if error == "access_denied":
+        raise web.HTTPFound("/?new=1")  # user cancelled — quietly back to the login page
+    if error or not request.query.get("code"):
+        raise web.HTTPBadRequest(text=f"Authorization failed: {error or 'no code returned'}")
     client_id = request.query.get("state")
     if not client_id:
         raise web.HTTPBadRequest(text="Missing state (clientId).")
@@ -265,10 +268,6 @@ async def export(request: web.Request) -> web.Response:
     return web.Response(text=markdown, content_type="text/markdown")
 
 
-async def health(request: web.Request) -> web.Response:
-    return web.json_response({"ok": True})
-
-
 def make_app() -> web.Application:
     app = web.Application()
     app.add_routes([
@@ -278,7 +277,6 @@ def make_app() -> web.Application:
         web.get("/logout", logout),
         web.get("/callback", callback),
         web.get("/export", export),
-        web.get("/health", health),
     ])
     return app
 
