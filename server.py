@@ -17,6 +17,7 @@ Run:
 
 import asyncio
 import json
+import logging
 import os
 from datetime import date, timedelta
 from pathlib import Path
@@ -26,11 +27,12 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 from strava_export import (
-    AUTHORIZE_URL, SCOPE, DailyLimitReached, StravaAuth, StravaClient,
+    AUTHORIZE_URL, SCOPE, DailyLimitReached, RateLimited, StravaAuth, StravaClient,
     load_detail, parse_date, render_activity, render_combined, user_dir,
 )
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 CACHE_DIR = DATA_DIR / "cache"  # shared across users
@@ -54,6 +56,23 @@ def _load_secret(client_id: str) -> dict | None:
 
 def _connected(client_id: str | None) -> bool:
     return bool(client_id) and (user_dir(DATA_DIR, client_id) / "tokens.json").exists()
+
+
+def _load_athlete(client_id: str) -> dict | None:
+    d = user_dir(DATA_DIR, client_id)
+    if (d / "athlete.json").exists():
+        return json.loads((d / "athlete.json").read_text())
+    # Fall back to the athlete embedded in the initial token response, then cache it.
+    if (d / "tokens.json").exists():
+        athlete = json.loads((d / "tokens.json").read_text()).get("athlete")
+        if athlete:
+            _save_athlete(client_id, athlete)
+            return athlete
+    return None
+
+
+def _save_athlete(client_id: str, athlete: dict) -> None:
+    (user_dir(DATA_DIR, client_id) / "athlete.json").write_text(json.dumps(athlete))
 
 
 def _auth_for(client_id: str) -> StravaAuth:
@@ -83,8 +102,12 @@ def _base_url(request: web.Request) -> str:
 # -- export -----------------------------------------------------------------
 
 def _collect(client_id: str, after: int | None, before: int | None, limit: int | None) -> str:
-    """Blocking: fetch from Strava and return (and persist) the combined Markdown."""
-    client = StravaClient(_auth_for(client_id))
+    """Blocking: fetch from Strava and return (and persist) the combined Markdown.
+
+    Uses wait_on_limit=False so a rate-limited request fails fast (RateLimited)
+    instead of blocking the HTTP response for up to 15 minutes.
+    """
+    client = StravaClient(_auth_for(client_id), wait_on_limit=False)
     athlete = client.get_athlete()
     summaries: list[dict] = []
     for summary in client.iter_activities(after, before):
@@ -92,14 +115,11 @@ def _collect(client_id: str, after: int | None, before: int | None, limit: int |
         if limit and len(summaries) >= limit:
             break
     detailed, sections = [], []
-    try:
-        for summary in summaries:
-            detail, zones = load_detail(client, summary, CACHE_DIR, refresh=False,
-                                        fetch_zones=bool(summary.get("has_heartrate")))
-            detailed.append(detail)
-            sections.append(render_activity(detail, zones))
-    except DailyLimitReached:
-        pass  # Strava's daily quota is spent — return what we managed to fetch.
+    for summary in summaries:
+        detail, zones = load_detail(client, summary, CACHE_DIR, refresh=False,
+                                    fetch_zones=bool(summary.get("has_heartrate")))
+        detailed.append(detail)
+        sections.append(render_activity(detail, zones))
     markdown = render_combined(athlete, detailed, sections)
     (user_dir(DATA_DIR, client_id) / "all_activities.md").write_text(markdown)  # latest report per user
     return markdown
@@ -187,10 +207,14 @@ def _profile_page(cid: str, athlete: dict | None, base_url: str) -> str:
 async def index(request: web.Request) -> web.Response:
     cid = request.query.get("clientId") or request.cookies.get("clientId") or DEFAULT_CLIENT_ID or ""
     if cid and _connected(cid) and not request.query.get("new"):
-        try:
-            athlete = await asyncio.to_thread(lambda: StravaClient(_auth_for(cid)).get_athlete())
-        except (Exception, SystemExit):
-            athlete = None
+        athlete = _load_athlete(cid)  # stored at connect time — no API call, no hang
+        if athlete is None:  # older session: fetch once (fail-fast on rate limit) and cache
+            try:
+                athlete = await asyncio.to_thread(
+                    lambda: StravaClient(_auth_for(cid), wait_on_limit=False).get_athlete())
+                _save_athlete(cid, athlete)
+            except (Exception, SystemExit):
+                athlete = None
         return web.Response(text=_profile_page(cid, athlete, _base_url(request)), content_type="text/html")
     return web.Response(text=_login_page(cid), content_type="text/html")
 
@@ -233,7 +257,9 @@ async def callback(request: web.Request) -> web.Response:
     client_id = request.query.get("state")
     if not client_id:
         raise web.HTTPBadRequest(text="Missing state (clientId).")
-    _auth_for(client_id).authorize_with_code(request.query["code"])  # writes data/users/<id>/tokens.json
+    tokens = _auth_for(client_id).authorize_with_code(request.query["code"])  # writes tokens.json
+    if tokens.get("athlete"):
+        _save_athlete(client_id, tokens["athlete"])  # so the profile page needs no API call
     resp = web.HTTPFound("/")
     resp.set_cookie("clientId", client_id, max_age=31536000, httponly=True, samesite="Lax")
     raise resp
@@ -263,6 +289,11 @@ async def export(request: web.Request) -> web.Response:
         markdown = await asyncio.to_thread(_collect, client_id, after, before, limit)
     except web.HTTPException:
         raise
+    except (RateLimited, DailyLimitReached) as exc:
+        retry = getattr(exc, "retry_after", 900) or 900
+        raise web.HTTPTooManyRequests(
+            text="Strava rate limit reached. Please try again in a few minutes.",
+            headers={"Retry-After": str(retry)})
     except (Exception, SystemExit) as exc:
         raise web.HTTPBadGateway(text=f"Strava request failed: {exc}")
     return web.Response(text=markdown, content_type="text/markdown")

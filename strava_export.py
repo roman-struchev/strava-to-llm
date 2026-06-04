@@ -43,6 +43,14 @@ class DailyLimitReached(Exception):
     """Raised when Strava's daily request quota is exhausted (resume tomorrow)."""
 
 
+class RateLimited(Exception):
+    """Raised when a 15-min window is hit and the client is set not to wait."""
+
+    def __init__(self, retry_after: int = 0) -> None:
+        super().__init__(f"Strava rate limit reached; retry in ~{retry_after}s.")
+        self.retry_after = retry_after
+
+
 # Sports measured by pace (time per distance) rather than speed.
 FOOT_SPORTS = {"Run", "TrailRun", "VirtualRun", "Walk", "Hike", "Wheelchair"}
 SWIM_SPORTS = {"Swim"}
@@ -108,13 +116,15 @@ class StravaAuth:
             self._save(self._tokens)
         return self._tokens["access_token"]
 
-    def authorize_with_code(self, code: str) -> None:
-        """Exchange an OAuth authorization code for tokens and persist them.
+    def authorize_with_code(self, code: str) -> dict:
+        """Exchange an OAuth authorization code for tokens, persist and return them.
 
-        Used by the web server's /callback, which captures the code itself.
+        Used by the web server's /callback, which captures the code itself. The
+        returned dict includes Strava's ``athlete`` object on first authorization.
         """
         self._tokens = self._exchange_code(code)
         self._save(self._tokens)
+        return self._tokens
 
     def _load(self) -> dict | None:
         if not self.token_path.exists():
@@ -174,10 +184,11 @@ class StravaAuth:
 class StravaClient:
     """Authenticated Strava API client with pagination and rate limiting."""
 
-    def __init__(self, auth: StravaAuth, max_retries: int = 5) -> None:
+    def __init__(self, auth: StravaAuth, max_retries: int = 5, wait_on_limit: bool = True) -> None:
         self.auth = auth
         self.session = auth.session
         self.max_retries = max_retries
+        self.wait_on_limit = wait_on_limit  # False → raise RateLimited instead of sleeping
 
     def _get(self, path: str, params: dict | None = None):
         for attempt in range(1, self.max_retries + 1):
@@ -191,6 +202,8 @@ class StravaClient:
                 if limits and limits[2] >= limits[3]:  # daily quota exhausted
                     raise DailyLimitReached()
                 wait = self._until_window_reset()
+                if not self.wait_on_limit:
+                    raise RateLimited(wait)
                 log.warning("Rate limited (attempt %d/%d). Sleeping %dm %ds for the next window.",
                             attempt, self.max_retries, wait // 60, wait % 60)
                 time.sleep(wait)
@@ -226,6 +239,8 @@ class StravaClient:
             raise DailyLimitReached()
         if short_usage >= short_limit - 1:
             wait = self._until_window_reset()
+            if not self.wait_on_limit:
+                raise RateLimited(wait)
             log.warning("15-min limit reached (%d/%d, daily %d/%d). Sleeping %dm %ds.",
                         short_usage, short_limit, daily_usage, daily_limit, wait // 60, wait % 60)
             time.sleep(wait)
@@ -490,7 +505,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     load_dotenv()
 
     data_dir: Path = args.data
