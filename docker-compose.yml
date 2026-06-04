@@ -1,6 +1,7 @@
 services:
   strava-to-llm:
     image: romanew/all:strava-to-llm
+    container_name: strava-to-llm
     restart: unless-stopped
     ports:
       - "11004:8000"
