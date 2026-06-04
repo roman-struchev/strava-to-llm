@@ -199,8 +199,9 @@ class StravaClient:
             )
             limits = self._parse_limits(resp)
             usage = f" [15m {limits[0]}/{limits[1]}, day {limits[2]}/{limits[3]}]" if limits else ""
+            read = self._read_usage(resp)
             query = "?" + "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
-            log.info("Strava GET %s%s -> %d%s", path, query, resp.status_code, usage)
+            log.info("Strava GET %s%s -> %d%s%s", path, query, resp.status_code, usage, read)
 
             if resp.status_code == 429:
                 limits = self._parse_limits(resp)
@@ -233,6 +234,16 @@ class StravaClient:
             return int(usage[0]), int(limit[0]), int(usage[1]), int(limit[1])
         except (KeyError, ValueError, IndexError):
             return None
+
+    @staticmethod
+    def _read_usage(resp: requests.Response) -> str:
+        """Read-specific rate limit (often lower than the overall one), for logging."""
+        try:
+            u = resp.headers["X-ReadRateLimit-Usage"].split(",")
+            limit = resp.headers["X-ReadRateLimit-Limit"].split(",")
+            return f" read[15m {u[0]}/{limit[0]}, day {u[1]}/{limit[1]}]"
+        except (KeyError, ValueError, IndexError):
+            return ""
 
     def _maybe_throttle(self, resp: requests.Response) -> None:
         """Stop on daily exhaustion; pause when close to the 15-minute quota."""

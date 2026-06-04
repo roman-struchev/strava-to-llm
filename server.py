@@ -104,23 +104,36 @@ def _base_url(request: web.Request) -> str:
 def _collect(client_id: str, after: int | None, before: int | None, limit: int | None) -> str:
     """Blocking: fetch from Strava and return (and persist) the combined Markdown.
 
-    Uses wait_on_limit=False so a rate-limited request fails fast (RateLimited)
-    instead of blocking the HTTP response for up to 15 minutes.
+    Uses wait_on_limit=False so it never blocks the HTTP response. If Strava's
+    rate limit is hit mid-export, it returns whatever was fetched so far plus a
+    note; cached activities make a follow-up request pick up the rest. Only when
+    even the athlete can't be loaded does the limit propagate (handled as 429).
     """
     client = StravaClient(_auth_for(client_id), wait_on_limit=False)
-    athlete = client.get_athlete()
+    athlete = client.get_athlete()  # if this is rate-limited, the caller returns 429
+
     summaries: list[dict] = []
-    for summary in client.iter_activities(after, before):
-        summaries.append(summary)
-        if limit and len(summaries) >= limit:
-            break
     detailed, sections = [], []
-    for summary in summaries:
-        detail, zones = load_detail(client, summary, CACHE_DIR, refresh=False,
-                                    fetch_zones=bool(summary.get("has_heartrate")))
-        detailed.append(detail)
-        sections.append(render_activity(detail, zones))
-    markdown = render_combined(athlete, detailed, sections)
+    truncated = False
+    try:
+        for summary in client.iter_activities(after, before):
+            summaries.append(summary)
+            if limit and len(summaries) >= limit:
+                break
+        for summary in summaries:
+            detail, zones = load_detail(client, summary, CACHE_DIR, refresh=False,
+                                        fetch_zones=bool(summary.get("has_heartrate")))
+            detailed.append(detail)
+            sections.append(render_activity(detail, zones))
+    except (RateLimited, DailyLimitReached):
+        truncated = True
+
+    note = ""
+    if truncated:
+        note = (f"> ⚠️ Partial export — Strava rate limit reached after {len(detailed)} activities. "
+                "Run the same request again in a few minutes to fetch the rest "
+                "(already-fetched activities are cached).\n\n")
+    markdown = note + render_combined(athlete, detailed, sections)
     (user_dir(DATA_DIR, client_id) / "all_activities.md").write_text(markdown)  # latest report per user
     return markdown
 
