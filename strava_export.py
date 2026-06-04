@@ -197,6 +197,11 @@ class StravaClient:
                 headers={"Authorization": f"Bearer {self.auth.get_access_token()}"},
                 params=params, timeout=60,
             )
+            limits = self._parse_limits(resp)
+            usage = f" [15m {limits[0]}/{limits[1]}, day {limits[2]}/{limits[3]}]" if limits else ""
+            query = "?" + "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
+            log.info("Strava GET %s%s -> %d%s", path, query, resp.status_code, usage)
+
             if resp.status_code == 429:
                 limits = self._parse_limits(resp)
                 if limits and limits[2] >= limits[3]:  # daily quota exhausted
