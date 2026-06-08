@@ -424,6 +424,7 @@ def render_activity(a: dict, zones: list | None = None) -> str:
         ("Avg power", _num(_hr(a.get("average_watts")), " W")),
         ("Max power", _num(a.get("max_watts"), " W")),
         ("Avg cadence", _num(_hr(a.get("average_cadence")))),
+        ("Avg temp", _num(a.get("average_temp"), " °C")),
         ("Elevation gain", fmt_elev(a.get("total_elevation_gain"))),
         ("Calories", _num(a.get("calories"))),
         ("Relative effort", _num(a.get("suffer_score"))),
@@ -447,16 +448,17 @@ def render_overview(athlete: dict, activities: list[dict]) -> str:
         f"Total activities: **{len(activities)}**  ",
         "Distances in km, durations as H:MM:SS, paces per km / per 100 m, speeds in km/h.", "",
         "## Overview", "",
-        "| Date | Sport | Name | Distance | Time | Pace/Speed | Avg HR | Elev |",
-        "|---|---|---|---|---|---|---:|---:|",
+        "| Date | Sport | Name | Distance | Time | Pace/Speed | Avg HR | Temp | Elev |",
+        "|---|---|---|---|---|---|---:|---:|---:|",
     ]
     for a in activities:
         sport = a.get("sport_type") or a.get("type") or ""
-        lines.append("| {date} | {sport} | {name} | {dist} | {time} | {pace} | {hr} | {elev} |".format(
+        lines.append("| {date} | {sport} | {name} | {dist} | {time} | {pace} | {hr} | {temp} | {elev} |".format(
             date=fmt_date(a.get("start_date_local")), sport=sport,
             name=(a.get("name") or "").replace("|", "\\|"), dist=fmt_distance(a.get("distance")),
             time=fmt_duration(a.get("moving_time")), pace=fmt_pace(a.get("average_speed"), sport),
-            hr=_num(_hr(a.get("average_heartrate"))), elev=fmt_elev(a.get("total_elevation_gain"))))
+            hr=_num(_hr(a.get("average_heartrate"))), temp=_num(a.get("average_temp"), "°C"),
+            elev=fmt_elev(a.get("total_elevation_gain"))))
     return "\n".join(lines) + "\n"
 
 
