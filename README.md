@@ -158,6 +158,11 @@ Output goes to `data/coros_mcp/coros_all_activities.md`. Per-activity detail and
 are cached by activity id under `data/cache/` (COROS activities never change), so
 re-runs are fast; pass `--refresh` to re-fetch.
 
+By default **all history** is fetched (like the Strava exporter). COROS scans the
+requested date range server-side, so a full export's summary call is slow and
+`--limit` does **not** speed it up (unlike Strava). Narrow it with `--after` (CLI)
+or `&after=YYYY-MM-DD` (server) when you only need recent activities quickly.
+
 ### What's in the export
 
 COROS's MCP answers in ready-made human-readable prose, so the export keeps that

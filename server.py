@@ -244,12 +244,16 @@ async function copyExport(btn, url){
 </body></html>"""
 
 
-def _example_links(export_url: str) -> str:
+def _example_links(export_url: str, recent_last: bool = False) -> str:
     today = date.today()
     sep = "&" if "?" in export_url else "?"
     # (label, url, show a Copy button?) — the label itself is the link; the raw URL isn't shown.
+    # recent_last: COROS scans the whole date range server-side (limit doesn't help), so scope
+    # "last activity" to the past month — fast, and an active user always has something there.
+    last = (f"{export_url}{sep}after={(today - timedelta(days=30)).isoformat()}&limit=1"
+            if recent_last else f"{export_url}{sep}limit=1")
     examples = [
-        ("Last activity only", f"{export_url}{sep}limit=1", True),
+        ("Last activity only", last, True),
         ("Last week", f"{export_url}{sep}after={(today - timedelta(days=7)).isoformat()}", False),
         ("This year", f"{export_url}{sep}after={today.year}-01-01", False),
     ]
@@ -307,7 +311,7 @@ def _coros_card(base_url: str, client_id: str) -> str:
               '<div><div style="font-size:20px;font-weight:600;">Connected to COROS</div>'
               '<div class="muted">COROS · via official MCP</div></div>'
               f'{logout}</div>')
-    links = _example_links(f"{base_url}/coros/export?clientId={client_id}")
+    links = _example_links(f"{base_url}/coros/export?clientId={client_id}", recent_last=True)
     return f'<div class="card coros">{header}{links}</div>'
 
 

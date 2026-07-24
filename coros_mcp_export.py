@@ -77,6 +77,10 @@ DEFAULT_PORT = 8722
 COROS_SUBDIR = "coros_mcp"  # under the data dir: OAuth tokens + reports live here
 CALL_TIMEOUT = timedelta(seconds=180)  # a wide querySportRecords range can take ~20s+
 DEFAULT_CONCURRENCY = 6  # max in-flight MCP tool calls (detail/laps run in parallel)
+# Default start when no `after` is given — effectively "all history" (like the
+# Strava exporter, which fetches everything). COROS scans the range server-side,
+# so a full export's summary call is slower; narrow it with `after` when you want.
+ALL_TIME_START = "20100101"
 
 # Tool names aren't documented here; auto-pick the one that most looks like a
 # "list my workouts/activities" tool. Overridable with --tool.
@@ -263,7 +267,7 @@ def _print_tools(tools: list) -> None:
         print()
 
 
-def _resolve_tool(tools: list, wanted: str | None):
+def _resolve_tool(tools: list, wanted: str | None) -> Any:
     if wanted:
         for t in tools:
             if t.name == wanted:
@@ -291,12 +295,12 @@ def _to_yyyymmdd(value: str | None, default: str) -> str:
 
 def _sport_records_args(after, before, limit) -> dict:
     """Full argument set for COROS' ``querySportRecords`` (all its fields are
-    marked required). Wide ranges + all sport types so nothing is filtered out;
-    the caller trims to --limit afterwards."""
-    today = datetime.now().strftime("%Y%m%d")
+    marked required). All sport types + no distance/duration filter; the date
+    range defaults to all history (like the Strava exporter) — pass ``after`` to
+    narrow it, which also makes the (server-side) scan much faster."""
     return {
-        "startDate": _to_yyyymmdd(after, "20100101"),
-        "endDate": _to_yyyymmdd(before, today),
+        "startDate": _to_yyyymmdd(after, ALL_TIME_START),
+        "endDate": _to_yyyymmdd(before, datetime.now().strftime("%Y%m%d")),
         "sportTypeCodes": [65535],       # 65535 == all sports (per the tool's docs)
         "minDistanceKm": 0,
         "maxDistanceKm": 100000,
@@ -576,7 +580,7 @@ async def _activity_raw(session, sem: asyncio.Semaphore, args: dict, label_id: s
     # Cache only a fully successful fetch, so a transient error is retried next time.
     if cache_file and not isinstance(detail_res, BaseException) and not isinstance(laps_res, BaseException):
         try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps({"detail": detail_raw, "laps": laps_payload}, ensure_ascii=False))
         except OSError:
             pass
@@ -691,7 +695,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Export your COROS activities to Markdown via the official COROS MCP.")
     p.add_argument("--data", type=Path, default=Path("data"),
                    help="Root data directory for tokens and reports (default: ./data).")
-    p.add_argument("--after", help="Only activities on/after this date (YYYY-MM-DD or yyyyMMdd).")
+    p.add_argument("--after", help="Only activities on/after this date (YYYY-MM-DD or yyyyMMdd). "
+                                    "Default: all history (COROS scans the range, so narrowing it is faster).")
     p.add_argument("--before", help="Only activities before this date (YYYY-MM-DD or yyyyMMdd).")
     p.add_argument("--limit", type=int, help="Keep at most N activities (newest first).")
     p.add_argument("--no-detail", dest="detail", action="store_false",
