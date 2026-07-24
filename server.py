@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -42,12 +43,28 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-CACHE_DIR = DATA_DIR / "cache"  # shared across users
+CACHE_DIR = DATA_DIR / "cache" / "strava"    # Strava per-activity cache (shared across users)
+COROS_CACHE_DIR = DATA_DIR / "cache" / "coros"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+COROS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# Migrate the old flat cache (data/cache/*.json) into the per-provider subfolders.
+for _f in (DATA_DIR / "cache").glob("activity_*.json"):
+    _f.replace(CACHE_DIR / _f.name)
+for _f in (DATA_DIR / "cache").glob("coros_*.json"):
+    _f.replace(COROS_CACHE_DIR / _f.name)
 
-# COROS connects once via the official MCP (the operator's own COROS account),
-# so it isn't per-user like Strava — tokens + reports live in one directory.
+# COROS is multi-user like Strava, but COROS has no user-supplied client id — so
+# each connection gets a generated capability id; its tokens live in
+# data/coros_mcp/<id>/ and the export link carries ?clientId=<id> (the id is the key).
 COROS_DIR = DATA_DIR / coros.COROS_SUBDIR
+
+
+def _coros_dir(client_id: str) -> Path:
+    """Per-connection COROS token directory (client id sanitized against traversal)."""
+    safe = "".join(c for c in str(client_id) if c.isalnum() or c in "-_")
+    if not safe:
+        raise web.HTTPBadRequest(text="Invalid COROS clientId.")
+    return COROS_DIR / safe
 
 
 # -- per-user storage -------------------------------------------------------
@@ -269,12 +286,13 @@ def _strava_card(cid: str, athlete: dict | None, base_url: str) -> str:
         header = (f'<div style="display:flex;align-items:center;"><div><h2>Connected to Strava</h2>'
                   '<p class="muted">Profile couldn\'t be loaded — the token may need reconnecting.</p>'
                   f"</div>{logout}</div>")
-    links = _example_links(f"{base_url}/export?clientId={cid}")
+    links = _example_links(f"{base_url}/strava/export?clientId={cid}")
     return f'<div class="card">{header}{links}</div>'
 
 
-def _coros_card(base_url: str) -> str:
-    if not coros.is_connected(COROS_DIR):
+def _coros_card(base_url: str, client_id: str) -> str:
+    connected = bool(client_id) and (COROS_DIR / client_id / "mcp_tokens.json").exists()
+    if not connected:
         body = """<h2>Connect COROS</h2>
       <p>Connect with your normal COROS account through the official
         <a href="https://coros.com/stories/coros-metrics/c/mcp-testing" target="_blank">COROS MCP</a> —
@@ -284,12 +302,12 @@ def _coros_card(base_url: str) -> str:
         <code>python coros_mcp_export.py</code></p>"""
         return f'<div class="card coros">{body}</div>'
 
-    logout = '<a class="logout" href="/coros/logout">Log out</a>'
+    logout = f'<a class="logout" href="/coros/logout?clientId={client_id}">Log out</a>'
     header = (f'<div style="display:flex;align-items:center;">'
               '<div><div style="font-size:20px;font-weight:600;">Connected to COROS</div>'
               '<div class="muted">COROS · via official MCP</div></div>'
               f'{logout}</div>')
-    links = _example_links(f"{base_url}/coros/export")
+    links = _example_links(f"{base_url}/coros/export?clientId={client_id}")
     return f'<div class="card coros">{header}{links}</div>'
 
 
@@ -309,8 +327,9 @@ async def index(request: web.Request) -> web.Response:
             except (Exception, SystemExit):
                 athlete = None
 
+    ccid = request.query.get("clientId") or request.cookies.get("corosClientId") or ""
     strava_card = _strava_card("" if new else cid, athlete, base_url)
-    coros_card = _coros_card(base_url)
+    coros_card = _coros_card(base_url, "" if new else ccid)
     body = ('<h1>Export your activities to Markdown for an LLM</h1>'
             '<p class="muted">Connect Strava, COROS, or both. Each export endpoint returns clean '
             'Markdown you can hand to ChatGPT, Claude or any other model.</p>'
@@ -404,8 +423,9 @@ async def export(request: web.Request) -> web.Response:
 # cycle: /coros/login starts a background connect task, hands the browser the
 # authorization URL, and /coros/callback feeds the returned code back to it.
 
-_coros_pending: dict[str, asyncio.Future] = {}  # OAuth state -> future of (code, state)
-_coros_connect_task: asyncio.Task | None = None
+# OAuth state -> {"code_fut": Future, "task": connect Task}. Keyed by state so
+# concurrent connections (different users) don't collide.
+_coros_pending: dict[str, dict] = {}
 
 
 def _flatten_error(exc: BaseException | None) -> str:
@@ -418,8 +438,6 @@ def _flatten_error(exc: BaseException | None) -> str:
 
 
 async def coros_login(request: web.Request) -> web.Response:
-    if coros.is_connected(COROS_DIR):
-        raise web.HTTPFound("/")
     base = _base_url(request)
     parsed = urlparse(base)
     # COROS's OAuth server rejects non-HTTPS callbacks except for loopback hosts.
@@ -429,39 +447,43 @@ async def coros_login(request: web.Request) -> web.Response:
             f"Open this page via http://localhost:{parsed.port or 80} (loopback http is allowed), "
             "or serve the app behind HTTPS."))
 
+    client_id = secrets.token_urlsafe(9)  # capability id for this connection (the export key)
+    store_dir = COROS_DIR / client_id
     loop = asyncio.get_running_loop()
     auth_url_fut: asyncio.Future = loop.create_future()
+    holder: dict = {}
 
     async def redirect_handler(authorization_url: str) -> None:
         state = parse_qs(urlparse(authorization_url).query).get("state", [None])[0]
         code_fut: asyncio.Future = loop.create_future()
+        holder["code_fut"] = code_fut
         if state:
-            _coros_pending[state] = code_fut
+            _coros_pending[state] = {"code_fut": code_fut, "task": holder.get("task")}
         if not auth_url_fut.done():
-            auth_url_fut.set_result((authorization_url, code_fut))
+            auth_url_fut.set_result(authorization_url)
 
     async def callback_handler() -> tuple[str, str | None]:
-        _url, code_fut = await auth_url_fut
-        return await code_fut
+        return await holder["code_fut"]
 
     await coros.resolve_mcp_url()  # adopt COROS's regional endpoint before authorizing
-    oauth = coros.make_oauth(COROS_DIR, redirect_uri=f"{base}/coros/callback",
+    oauth = coros.make_oauth(store_dir, redirect_uri=f"{base}/coros/callback",
                              redirect_handler=redirect_handler, callback_handler=callback_handler)
 
     async def _connect() -> None:
         async with coros.mcp_session(oauth) as session:
             await session.list_tools()  # any authenticated call forces token storage
 
-    global _coros_connect_task
-    _coros_connect_task = asyncio.create_task(_connect())
+    task = asyncio.create_task(_connect())
+    holder["task"] = task  # set synchronously before the loop runs the task
     # Whichever comes first: the authorization URL to redirect to, or a connect failure.
-    done, _pending = await asyncio.wait({auth_url_fut, _coros_connect_task},
-                                        timeout=45, return_when=asyncio.FIRST_COMPLETED)
+    done, _pending = await asyncio.wait({auth_url_fut, task}, timeout=45,
+                                        return_when=asyncio.FIRST_COMPLETED)
     if auth_url_fut in done:
-        authorization_url, _fut = auth_url_fut.result()
-        raise web.HTTPFound(authorization_url)
-    if _coros_connect_task in done:  # finished before yielding a URL → it errored
-        raise web.HTTPBadGateway(text=f"COROS authorization failed: {_flatten_error(_coros_connect_task.exception())}")
+        resp = web.HTTPFound(auth_url_fut.result())
+        resp.set_cookie("corosClientId", client_id, max_age=31536000, httponly=True, samesite="Lax")
+        raise resp
+    if task in done:  # finished before yielding a URL → it errored
+        raise web.HTTPBadGateway(text=f"COROS authorization failed: {_flatten_error(task.exception())}")
     raise web.HTTPBadGateway(text="COROS authorization timed out — try again.")
 
 
@@ -472,36 +494,47 @@ async def coros_callback(request: web.Request) -> web.Response:
     if error or not request.query.get("code"):
         raise web.HTTPBadRequest(text=f"Authorization failed: {error or 'no code returned'}")
     state = request.query.get("state")
-    fut = _coros_pending.pop(state, None)
-    if fut is None:
+    entry = _coros_pending.pop(state, None)
+    if entry is None:
         raise web.HTTPBadRequest(text="Unexpected COROS callback — start again from the home page.")
-    if not fut.done():
-        fut.set_result((request.query["code"], state))
-    if _coros_connect_task is not None:
+    if not entry["code_fut"].done():
+        entry["code_fut"].set_result((request.query["code"], state))
+    task = entry.get("task")
+    if task is not None:
         try:  # wait for the background task to exchange the code and store the token
-            await asyncio.wait_for(asyncio.shield(_coros_connect_task), timeout=30)
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
         except Exception:
             pass
     raise web.HTTPFound("/")
 
 
 async def coros_logout(request: web.Request) -> web.Response:
-    for name in ("mcp_tokens.json", "mcp_client.json"):
-        path = COROS_DIR / name
-        if path.exists():
-            path.unlink()
-    raise web.HTTPFound("/?new=1")
+    client_id = request.query.get("clientId") or request.cookies.get("corosClientId")
+    if client_id:
+        store_dir = _coros_dir(client_id)
+        for name in ("mcp_tokens.json", "mcp_client.json"):
+            path = store_dir / name
+            if path.exists():
+                path.unlink()
+    resp = web.HTTPFound("/?new=1")
+    resp.del_cookie("corosClientId")
+    raise resp
 
 
 async def coros_export(request: web.Request) -> web.Response:
-    if not coros.is_connected(COROS_DIR):
-        raise web.HTTPUnauthorized(text="COROS not connected. Open the home page and connect COROS first.")
+    client_id = request.query.get("clientId")
+    if not client_id:
+        raise web.HTTPBadRequest(text="clientId is required.")
+    store_dir = _coros_dir(client_id)
+    if not coros.is_connected(store_dir):
+        raise web.HTTPUnauthorized(text="Not connected. Open the home page and connect this COROS clientId first.")
     limit = int(request.query["limit"]) if request.query.get("limit") else None
     detail = request.query.get("detail", "1") not in ("0", "false", "no")  # on by default
     try:
         markdown = await coros.collect_markdown(
-            COROS_DIR, after=request.query.get("after"), before=request.query.get("before"),
-            limit=limit, tool=request.query.get("tool"), detail=detail, interactive=False)
+            store_dir, after=request.query.get("after"), before=request.query.get("before"),
+            limit=limit, tool=request.query.get("tool"), detail=detail,
+            cache_dir=COROS_CACHE_DIR, interactive=False)
     except web.HTTPException:
         raise
     except (Exception, SystemExit) as exc:

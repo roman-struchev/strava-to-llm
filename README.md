@@ -130,7 +130,7 @@ The home page also has a **COROS** card (see below): click **Connect COROS** to
 authorize with your COROS account, then fetch the Markdown from:
 
 ```
-GET /coros/export[?after=YYYY-MM-DD&before=...&limit=N]
+GET /coros/export?clientId=YOUR_ID[&after=YYYY-MM-DD&before=...&limit=N&detail=0]
 ```
 
 ## COROS
@@ -151,14 +151,16 @@ python coros_mcp_export.py --no-detail   # summary only (skip per-activity detai
 ```
 
 The token is stored under `data/coros_mcp/` and reused (and refreshed) after that.
-Output goes to `data/coros_mcp/coros_all_activities.md`.
+Output goes to `data/coros_mcp/coros_all_activities.md`. Per-activity detail and laps
+are cached by activity id under `data/cache/` (COROS activities never change), so
+re-runs are fast; pass `--refresh` to re-fetch.
 
 ### What's in the export
 
 COROS's MCP answers in ready-made human-readable prose, so the export keeps that
 text and adds a parsed **Overview** table on top:
 
-- **Overview table** — date, sport, location, distance, time, pace/speed, HR, calories.
+- **Overview table** — date, sport, location, distance, time, pace/speed, HR.
 - **Per activity** (unless `--no-detail`): the full `getActivityDetail` text — HR,
   pace, **grade-adjusted pace**, cadence, power, stride, **elevation gain/loss**,
   training load — plus **lap tables**: your **manual (button) laps** first, then the
@@ -180,11 +182,13 @@ Diagnostics: `--list-tools` (all tools + schemas), `--raw` (dump a tool result),
 
 ### Web server
 
-`server.py` shows a **Connect COROS** button that runs the same authorization in
-your browser and then serves `GET /coros/export` (add `?detail=0` for summary
-only). On the home page the **Last activity** link has a **📋 Copy** button that
-copies the export Markdown straight to your clipboard. You can also authorize once
-via the CLI above; the server reuses the token in `data/coros_mcp/`.
+`server.py` is multi-user like the Strava side. Each **Connect COROS** mints a
+capability id and serves `GET /coros/export?clientId=<id>` (add `?detail=0` for
+summary only). COROS has no user-supplied client id, so that generated id *is* the
+key — anyone with the link can read that connection's data, exactly like a Strava
+`clientId` link, so treat it as a secret. Tokens live in `data/coros_mcp/<id>/`.
+On the home page the **Last activity** link has a **📋 Copy** button that copies
+the export Markdown straight to your clipboard.
 
 **Open the UI at `http://localhost:PORT`, not `http://0.0.0.0:PORT`.** COROS's OAuth
 only accepts non-HTTPS callback URLs for loopback hosts, and browsers only expose

@@ -543,39 +543,68 @@ def _render_laps(payload) -> str:
     return "\n".join(blocks).rstrip()
 
 
-async def _activity_section(session, sem: asyncio.Semaphore, rec: dict) -> list[str]:
-    """Markdown for one activity: its summary, then (concurrently fetched) detail + laps."""
+async def _activity_raw(session, sem: asyncio.Semaphore, args: dict, label_id: str,
+                        cache_dir: Path | None, refresh: bool):
+    """Return (raw detail text, raw lap payload) for one activity, from the on-disk
+    cache when possible. COROS activities are immutable, so a labelId is cached
+    forever (like the Strava exporter caches activity detail)."""
+    cache_file = (cache_dir / f"coros_{label_id}.json") if cache_dir else None
+    if cache_file and not refresh and cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_text())
+            return cached.get("detail"), cached.get("laps")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    async def _detail():
+        async with sem:
+            return await _call_text(session, "getActivityDetail", args)
+
+    async def _laps():
+        async with sem:
+            return await _call_payload(session, "queryActivityLapData", args)
+
+    detail_res, laps_res = await asyncio.gather(_detail(), _laps(), return_exceptions=True)
+    detail_raw = None if isinstance(detail_res, BaseException) else detail_res
+    laps_payload = None if isinstance(laps_res, BaseException) else laps_res
+    if isinstance(detail_res, BaseException):
+        log.warning("  getActivityDetail failed for %s: %s", label_id, detail_res)
+    if isinstance(laps_res, BaseException):
+        log.warning("  queryActivityLapData failed for %s: %s", label_id, laps_res)
+
+    # Cache only a fully successful fetch, so a transient error is retried next time.
+    if cache_file and not isinstance(detail_res, BaseException) and not isinstance(laps_res, BaseException):
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps({"detail": detail_raw, "laps": laps_payload}, ensure_ascii=False))
+        except OSError:
+            pass
+    return detail_raw, laps_payload
+
+
+async def _activity_section(session, sem: asyncio.Semaphore, rec: dict,
+                            cache_dir: Path | None = None, refresh: bool = False) -> list[str]:
+    """Markdown for one activity: its summary, then its detail + laps (cached by labelId)."""
     section = ["---", "", rec["text"].strip(), ""]
     if not rec["label_id"]:
         return section
     args = {"labelId": rec["label_id"], "sportType": rec["sport_type"]}
+    detail_raw, laps_payload = await _activity_raw(session, sem, args, rec["label_id"], cache_dir, refresh)
 
-    async def detail():
-        async with sem:
-            return _strip_fields(_humanize_timestamps(await _call_text(session, "getActivityDetail", args)))
-
-    async def laps():
-        async with sem:
-            return _render_laps(await _call_payload(session, "queryActivityLapData", args))
-
-    detail_text, laps_md = await asyncio.gather(detail(), laps(), return_exceptions=True)
-    if isinstance(detail_text, str) and detail_text.strip():
-        section += [detail_text.strip(), ""]
-    elif isinstance(detail_text, BaseException):
-        log.warning("  getActivityDetail failed for %s: %s", rec["label_id"], detail_text)
-        section += [f"_Detail unavailable: {detail_text}_", ""]
-    if isinstance(laps_md, str) and laps_md:
+    if detail_raw:
+        section += [_strip_fields(_humanize_timestamps(detail_raw)).strip(), ""]
+    laps_md = _render_laps(laps_payload) if laps_payload else ""
+    if laps_md:
         section += [laps_md, ""]
-    elif isinstance(laps_md, BaseException):
-        log.warning("  queryActivityLapData failed for %s: %s", rec["label_id"], laps_md)
     return section
 
 
 async def gather_export(session, *, tool=None, after=None, before=None, limit=None,
-                        json_args=None, detail=True, concurrency=DEFAULT_CONCURRENCY) -> str:
-    """Build the export: a current fitness/recovery snapshot, an Overview table,
-    then each activity in full (summary, detail, laps). Per-activity detail/lap
-    calls run concurrently, capped by ``concurrency`` in-flight MCP requests."""
+                        json_args=None, detail=True, concurrency=DEFAULT_CONCURRENCY,
+                        cache_dir: Path | None = None, refresh: bool = False) -> str:
+    """Build the export: an Overview table, then each activity in full (summary,
+    detail, laps). Per-activity detail/lap calls run concurrently (capped by
+    ``concurrency``) and are cached by labelId under ``cache_dir``."""
     tools = (await session.list_tools()).tools
     chosen = _resolve_tool(tools, tool)
     ns = argparse.Namespace(after=after, before=before, limit=limit, json=json_args)
@@ -594,7 +623,8 @@ async def gather_export(session, *, tool=None, after=None, before=None, limit=No
     if detail:  # fetch detail + laps for all activities concurrently, in order
         log.info("Fetching detail + laps for %d activities (concurrency %d)…", len(records), concurrency)
         sem = asyncio.Semaphore(max(1, concurrency))
-        section_lists = await asyncio.gather(*(_activity_section(session, sem, r) for r in records))
+        section_lists = await asyncio.gather(
+            *(_activity_section(session, sem, r, cache_dir, refresh) for r in records))
     else:
         section_lists = [["---", "", r["text"].strip(), ""] for r in records]
 
@@ -606,6 +636,7 @@ async def gather_export(session, *, tool=None, after=None, before=None, limit=No
 
 async def collect_markdown(store_dir: Path, *, after=None, before=None, limit=None,
                            tool=None, json_args=None, detail=True, concurrency=DEFAULT_CONCURRENCY,
+                           cache_dir: Path | None = None, refresh: bool = False,
                            interactive: bool = False, redirect_uri: str | None = None,
                            write_files: bool = True) -> str:
     """Connect (with stored tokens) and return the COROS export as Markdown/text.
@@ -618,7 +649,7 @@ async def collect_markdown(store_dir: Path, *, after=None, before=None, limit=No
     async with mcp_session(oauth) as session:
         markdown = await gather_export(session, tool=tool, after=after, before=before,
                                        limit=limit, json_args=json_args, detail=detail,
-                                       concurrency=concurrency)
+                                       concurrency=concurrency, cache_dir=cache_dir, refresh=refresh)
     if write_files:
         store_dir.mkdir(parents=True, exist_ok=True)
         (store_dir / "coros_all_activities.md").write_text(markdown)
@@ -645,7 +676,8 @@ async def run(args: argparse.Namespace) -> int:
         markdown = await gather_export(session, tool=args.tool, after=args.after,
                                        before=args.before, limit=args.limit,
                                        json_args=args.json, detail=args.detail,
-                                       concurrency=args.concurrency)
+                                       concurrency=args.concurrency,
+                                       cache_dir=args.data / "cache", refresh=args.refresh)
 
     store_dir.mkdir(parents=True, exist_ok=True)
     combined_path = store_dir / "coros_all_activities.md"
@@ -667,6 +699,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(detail=True)
     p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY,
                    help=f"Max parallel MCP calls when fetching detail/laps (default: {DEFAULT_CONCURRENCY}).")
+    p.add_argument("--refresh", action="store_true",
+                   help="Re-fetch per-activity detail/laps even if cached (cache lives in <data>/cache/).")
     p.add_argument("--tool", help="Exact MCP tool name to call (default: auto-pick querySportRecords).")
     p.add_argument("--json", help="Exact tool arguments as a JSON object (overrides --after/--before/--limit).")
     p.add_argument("--list-tools", action="store_true", help="List the server's tools and their schemas, then exit.")
