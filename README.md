@@ -159,10 +159,17 @@ COROS's MCP answers in ready-made human-readable prose, so the export keeps that
 text and adds a parsed **Overview** table on top:
 
 - **Overview table** — date, sport, location, distance, time, pace/speed, HR, calories.
-- **Per activity** (unless `--no-detail`): the full `getActivityDetail` text (HR,
-  pace, cadence, power, elevation, training load, …) plus **lap tables** — your
-  **manual (button) laps** first, then the 1 km auto splits, Strava-style. Detail
-  costs one extra call per activity, so use `--after`/`--limit` for long histories.
+- **Per activity** (unless `--no-detail`): the full `getActivityDetail` text — HR,
+  pace, **grade-adjusted pace**, cadence, power, stride, **elevation gain/loss**,
+  training load — plus **lap tables**: your **manual (button) laps** first, then the
+  1 km auto splits, Strava-style. Detail costs two calls per activity, run
+  concurrently across activities (`--concurrency`, default 6); use `--after`/`--limit`
+  for long histories.
+
+Grade-adjusted pace, elevation gain/loss and (for some sports) Efficiency Factor
+come straight from COROS. Not available: weather — humidity/wind aren't exposed,
+and ambient temperature lives only inside the FIT file. A few low-value fields
+(calories, max power, max cadence) are stripped from the output.
 
 **Region:** COROS routes each account to a regional MCP endpoint; the default is
 EU (`mcpeu.coros.com`). For another region set `COROS_MCP_URL` (or `--mcp-url`) to
@@ -175,8 +182,9 @@ Diagnostics: `--list-tools` (all tools + schemas), `--raw` (dump a tool result),
 
 `server.py` shows a **Connect COROS** button that runs the same authorization in
 your browser and then serves `GET /coros/export` (add `?detail=0` for summary
-only). You can also authorize once via the CLI above; the server reuses the token
-in `data/coros_mcp/`.
+only). On the home page the **Last activity** link has a **📋 Copy** button that
+fetches the export and copies the Markdown straight to your clipboard. You can also
+authorize once via the CLI above; the server reuses the token in `data/coros_mcp/`.
 
 ## Options
 

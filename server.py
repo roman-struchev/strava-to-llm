@@ -179,26 +179,69 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
  .ex{list-style:none;padding:0;margin:0}
  .ex li{margin:12px 0}
  .ex a{word-break:break-all}
+ .copy{margin-left:8px;padding:2px 9px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;font-size:12px;cursor:pointer;vertical-align:middle}
+ .copy:hover{border-color:var(--accent);color:var(--accent)}
+ .copy:disabled{cursor:default;opacity:.7}
+ .spinner{display:inline-block;width:10px;height:10px;border:2px solid #ccc;border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:-1px;margin-right:4px}
+ @keyframes spin{to{transform:rotate(360deg)}}
  code{background:#f4f4f4;padding:1px 5px;border-radius:4px}
  .muted{color:#888;font-size:14px}
  .gh{display:inline-flex;align-items:center;gap:7px;color:#888;text-decoration:none;font-size:14px;margin-top:44px}
  .gh:hover{color:#1a1a1a}
 </style></head><body>
 {body}
+<script>
+function legacyCopy(text){  // for insecure origins (e.g. 0.0.0.0) where navigator.clipboard is absent
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed'; ta.style.left = '-9999px'; ta.style.top = '0';
+  document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  try { ta.setSelectionRange(0, text.length); } catch(e) {}
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch(e) { ok = false; }
+  ta.remove();
+  return ok;
+}
+async function copyExport(btn, url){
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Fetching…';
+  try{
+    const resp = await fetch(url);
+    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+    const text = await resp.text();
+    let ok = false;
+    if(navigator.clipboard && window.isSecureContext){
+      try { await navigator.clipboard.writeText(text); ok = true; } catch(e) { ok = false; }
+    }
+    if(!ok) ok = legacyCopy(text);
+    btn.textContent = ok ? 'Copied ✓' : 'Copy failed (needs https or localhost)';
+  }catch(e){
+    btn.textContent = 'Failed: ' + e.message;
+  }
+  setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 2500);
+}
+</script>
 </body></html>"""
 
 
 def _example_links(export_url: str) -> str:
     today = date.today()
     sep = "&" if "?" in export_url else "?"
+    # (label, url, show a Copy button?) — the label itself is the link; the raw URL isn't shown.
     examples = [
-        ("Last activity only", f"{export_url}{sep}limit=1"),
-        ("Last week", f"{export_url}{sep}after={(today - timedelta(days=7)).isoformat()}"),
-        ("This year", f"{export_url}{sep}after={today.year}-01-01"),
+        ("Last activity only", f"{export_url}{sep}limit=1", True),
+        ("Last week", f"{export_url}{sep}after={(today - timedelta(days=7)).isoformat()}", False),
+        ("This year", f"{export_url}{sep}after={today.year}-01-01", False),
     ]
-    links = "".join(f'<li><b>{label}</b><br><a href="{url}">{url}</a></li>' for label, url in examples)
-    return ('<p style="margin-top:20px;">Example links — open one, or hand it to your LLM:</p>'
-            f'<ul class="ex">{links}</ul>')
+    items = []
+    for label, url, copyable in examples:
+        copy_btn = (f'<button type="button" class="copy" onclick="copyExport(this, \'{url}\')">📋 Copy</button>'
+                    if copyable else "")
+        items.append(f'<li><a href="{url}">{label}</a>{copy_btn}</li>')
+    return f'<ul class="ex" style="margin-top:20px;">{"".join(items)}</ul>'
 
 
 def _strava_card(cid: str, athlete: dict | None, base_url: str) -> str:

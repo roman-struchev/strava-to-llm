@@ -75,6 +75,7 @@ MCP_URL = os.getenv("COROS_MCP_URL", "https://mcpeu.coros.com/mcp")
 DEFAULT_PORT = 8722
 COROS_SUBDIR = "coros_mcp"  # under the data dir: OAuth tokens + reports live here
 CALL_TIMEOUT = timedelta(seconds=180)  # a wide querySportRecords range can take ~20s+
+DEFAULT_CONCURRENCY = 6  # max in-flight MCP tool calls (detail/laps run in parallel)
 
 # Tool names aren't documented here; auto-pick the one that most looks like a
 # "list my workouts/activities" tool. Overridable with --tool.
@@ -361,6 +362,21 @@ def _humanize_timestamps(text: str) -> str:
     return _TIME_WINDOW_RE.sub(repl, text or "")
 
 
+# Fields dropped from COROS prose as low-value for analysis.
+_STRIP_LABELS = ("Calories", "Max Power", "Max Cadence")
+
+
+def _strip_fields(text: str) -> str:
+    """Remove unwanted metrics from COROS prose, both as full ``Label: value`` lines
+    and as inline ``| Label: value`` segments (e.g. in the summary's pace line)."""
+    kept = [ln for ln in (text or "").splitlines()
+            if not any(re.match(rf"\s*{re.escape(lbl)}\s*:", ln, re.I) for lbl in _STRIP_LABELS)]
+    out = "\n".join(kept)
+    for lbl in _STRIP_LABELS:
+        out = re.sub(rf"\s*\|\s*{re.escape(lbl)}\s*:[^|\n]*", "", out, flags=re.I)
+    return out
+
+
 def _grab(block: str, pattern: str) -> str:
     """First capture group of ``pattern`` in ``block`` (up to a | or newline), or ''."""
     m = re.search(pattern, block)
@@ -389,7 +405,6 @@ def _parse_records(summary_text: str) -> list[dict]:
             "time": _grab(block, r"Duration:\s*([^|\n]+)"),
             "pace": _grab(block, r"Average (?:Pace|Speed):\s*([^|\n]+)"),
             "hr": _grab(block, r"Avg HR:\s*([^|\n]+)"),
-            "calories": _grab(block, r"Calories:\s*([^|\n]+)"),
         })
     return records
 
@@ -399,12 +414,11 @@ def _overview_table(records: list[dict]) -> str:
     lines = [
         "## Overview", "",
         f"Total activities: **{len(records)}**", "",
-        "| Date | Sport | Location | Distance | Time | Pace/Speed | Avg HR | Calories |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Date | Sport | Location | Distance | Time | Pace/Speed | Avg HR |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in records:
-        cells = [r["date"], r["sport"], r["location"], r["distance"], r["time"],
-                 r["pace"], r["hr"], r["calories"]]
+        cells = [r["date"], r["sport"], r["location"], r["distance"], r["time"], r["pace"], r["hr"]]
         lines.append("| " + " | ".join((c or "—").replace("|", "\\|") for c in cells) + " |")
     return "\n".join(lines)
 
@@ -501,52 +515,71 @@ def _render_laps(payload) -> str:
     return "\n".join(blocks).rstrip()
 
 
+async def _activity_section(session, sem: asyncio.Semaphore, rec: dict) -> list[str]:
+    """Markdown for one activity: its summary, then (concurrently fetched) detail + laps."""
+    section = ["---", "", rec["text"].strip(), ""]
+    if not rec["label_id"]:
+        return section
+    args = {"labelId": rec["label_id"], "sportType": rec["sport_type"]}
+
+    async def detail():
+        async with sem:
+            return _strip_fields(_humanize_timestamps(await _call_text(session, "getActivityDetail", args)))
+
+    async def laps():
+        async with sem:
+            return _render_laps(await _call_payload(session, "queryActivityLapData", args))
+
+    detail_text, laps_md = await asyncio.gather(detail(), laps(), return_exceptions=True)
+    if isinstance(detail_text, str) and detail_text.strip():
+        section += [detail_text.strip(), ""]
+    elif isinstance(detail_text, BaseException):
+        log.warning("  getActivityDetail failed for %s: %s", rec["label_id"], detail_text)
+        section += [f"_Detail unavailable: {detail_text}_", ""]
+    if isinstance(laps_md, str) and laps_md:
+        section += [laps_md, ""]
+    elif isinstance(laps_md, BaseException):
+        log.warning("  queryActivityLapData failed for %s: %s", rec["label_id"], laps_md)
+    return section
+
+
 async def gather_export(session, *, tool=None, after=None, before=None, limit=None,
-                        json_args=None, detail=True) -> str:
-    """Build the export: an Overview table, then each activity in full (its summary
-    followed immediately by its detail + laps) before moving on to the next one."""
+                        json_args=None, detail=True, concurrency=DEFAULT_CONCURRENCY) -> str:
+    """Build the export: a current fitness/recovery snapshot, an Overview table,
+    then each activity in full (summary, detail, laps). Per-activity detail/lap
+    calls run concurrently, capped by ``concurrency`` in-flight MCP requests."""
     tools = (await session.list_tools()).tools
     chosen = _resolve_tool(tools, tool)
     ns = argparse.Namespace(after=after, before=before, limit=limit, json=json_args)
     arguments = _build_arguments(chosen, ns)
     log.info("Calling %r with %s", chosen.name, arguments or "{}")
-    summary = _humanize_timestamps(await _call_text(session, chosen.name, arguments))
+    summary = _strip_fields(_humanize_timestamps(await _call_text(session, chosen.name, arguments)))
 
     records = _parse_records(summary)
+    if limit:
+        records = records[:limit]
+
     parts = ["# COROS export", ""]
     if not records:  # couldn't parse the prose — emit it verbatim and stop
         return "\n".join(parts + ["## Activities", "", summary.strip()]).rstrip() + "\n"
 
+    if detail:  # fetch detail + laps for all activities concurrently, in order
+        log.info("Fetching detail + laps for %d activities (concurrency %d)…", len(records), concurrency)
+        sem = asyncio.Semaphore(max(1, concurrency))
+        section_lists = await asyncio.gather(*(_activity_section(session, sem, r) for r in records))
+    else:
+        section_lists = [["---", "", r["text"].strip(), ""] for r in records]
+
     parts += [_overview_table(records), "", "---", "", "## Activities", ""]
-    if limit:
-        records = records[:limit]
-    for i, rec in enumerate(records, 1):
-        parts += ["---", "", rec["text"].strip(), ""]
-        if not detail or not rec["label_id"]:
-            continue
-        args = {"labelId": rec["label_id"], "sportType": rec["sport_type"]}
-        log.info("Fetching detail %d/%d (labelId=%s)…", i, len(records), rec["label_id"])
-        # Whole-activity detail — COROS returns readable prose, kept as-is.
-        try:
-            text = _humanize_timestamps(await _call_text(session, "getActivityDetail", args))
-            if text.strip():
-                parts += [text.strip(), ""]
-        except Exception as exc:
-            log.warning("  getActivityDetail failed for %s: %s", rec["label_id"], exc)
-            parts += [f"_Detail unavailable: {exc}_", ""]
-        # Laps incl. manual (button) laps — JSON rendered as Strava-style tables.
-        try:
-            laps_md = _render_laps(await _call_payload(session, "queryActivityLapData", args))
-            if laps_md:
-                parts += [laps_md, ""]
-        except Exception as exc:
-            log.warning("  queryActivityLapData failed for %s: %s", rec["label_id"], exc)
+    for section in section_lists:
+        parts += section
     return "\n".join(parts).rstrip() + "\n"
 
 
 async def collect_markdown(store_dir: Path, *, after=None, before=None, limit=None,
-                           tool=None, json_args=None, detail=True, interactive: bool = False,
-                           redirect_uri: str | None = None, write_files: bool = True) -> str:
+                           tool=None, json_args=None, detail=True, concurrency=DEFAULT_CONCURRENCY,
+                           interactive: bool = False, redirect_uri: str | None = None,
+                           write_files: bool = True) -> str:
     """Connect (with stored tokens) and return the COROS export as Markdown/text.
 
     Used by both the CLI and the web server. With ``interactive=False`` a missing
@@ -555,7 +588,8 @@ async def collect_markdown(store_dir: Path, *, after=None, before=None, limit=No
     oauth = make_oauth(store_dir, redirect_uri=redirect_uri, interactive=interactive)
     async with mcp_session(oauth) as session:
         markdown = await gather_export(session, tool=tool, after=after, before=before,
-                                       limit=limit, json_args=json_args, detail=detail)
+                                       limit=limit, json_args=json_args, detail=detail,
+                                       concurrency=concurrency)
     if write_files:
         store_dir.mkdir(parents=True, exist_ok=True)
         (store_dir / "coros_all_activities.md").write_text(markdown)
@@ -580,7 +614,8 @@ async def run(args: argparse.Namespace) -> int:
             return 0
         markdown = await gather_export(session, tool=args.tool, after=args.after,
                                        before=args.before, limit=args.limit,
-                                       json_args=args.json, detail=args.detail)
+                                       json_args=args.json, detail=args.detail,
+                                       concurrency=args.concurrency)
 
     store_dir.mkdir(parents=True, exist_ok=True)
     combined_path = store_dir / "coros_all_activities.md"
@@ -600,6 +635,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip per-activity detail + laps (default: fetch them). Detail adds "
                         "2 calls per activity — use --after/--limit for large histories.")
     p.set_defaults(detail=True)
+    p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY,
+                   help=f"Max parallel MCP calls when fetching detail/laps (default: {DEFAULT_CONCURRENCY}).")
     p.add_argument("--tool", help="Exact MCP tool name to call (default: auto-pick querySportRecords).")
     p.add_argument("--json", help="Exact tool arguments as a JSON object (overrides --after/--before/--limit).")
     p.add_argument("--list-tools", action="store_true", help="List the server's tools and their schemas, then exit.")
