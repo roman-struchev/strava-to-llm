@@ -453,6 +453,7 @@ def _overview_table(records: list[dict]) -> str:
 
 async def _call_payload(session, name: str, arguments: dict):
     """Call a tool and return its payload (a dict for JSON tools, str for prose)."""
+    log.info("COROS call %s %s", name, json.dumps(arguments, ensure_ascii=False) if arguments else "{}")
     result = await session.call_tool(name, arguments, read_timeout_seconds=CALL_TIMEOUT)
     return _extract_payload(result)
 
@@ -609,7 +610,6 @@ async def gather_export(session, *, tool=None, after=None, before=None, limit=No
     chosen = _resolve_tool(tools, tool)
     ns = argparse.Namespace(after=after, before=before, limit=limit, json=json_args)
     arguments = _build_arguments(chosen, ns)
-    log.info("Calling %r with %s", chosen.name, arguments or "{}")
     summary = _strip_fields(_humanize_timestamps(await _call_text(session, chosen.name, arguments)))
 
     records = _parse_records(summary)
@@ -669,8 +669,9 @@ async def run(args: argparse.Namespace) -> int:
             return 0
         if args.raw:  # call the chosen tool once and dump the raw result for inspection
             tool = _resolve_tool(tools, args.tool)
-            result = await session.call_tool(tool.name, _build_arguments(tool, args),
-                                             read_timeout_seconds=CALL_TIMEOUT)
+            arguments = _build_arguments(tool, args)
+            log.info("COROS call %s %s", tool.name, json.dumps(arguments, ensure_ascii=False) if arguments else "{}")
+            result = await session.call_tool(tool.name, arguments, read_timeout_seconds=CALL_TIMEOUT)
             _dump_raw(result)
             return 0
         markdown = await gather_export(session, tool=args.tool, after=args.after,

@@ -26,7 +26,10 @@ data/
 │   │   ├── 2024-05-12-123456-morning-run.md
 │   │   └── ...
 │   └── tokens.json             # your login token (kept private)
-└── cache/                      # raw API responses, reused on re-runs
+├── coros_mcp/                  # COROS OAuth tokens + reports (per connection)
+└── cache/
+    ├── strava/                 # raw Strava API responses, reused on re-runs
+    └── coros/                  # cached COROS activity detail + laps
 ```
 
 `all_activities.md` starts with a summary table of every activity, followed by
