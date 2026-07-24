@@ -126,6 +126,58 @@ Run your own with `python server.py`, or deploy with the included `Dockerfile`,
 `docker-compose.yml` and GitHub Actions workflow. The only requirement: set your
 Strava app's **Authorization Callback Domain** to the host you run it on.
 
+The home page also has a **COROS** card (see below): click **Connect COROS** to
+authorize with your COROS account, then fetch the Markdown from:
+
+```
+GET /coros/export[?after=YYYY-MM-DD&before=...&limit=N]
+```
+
+## COROS
+
+COROS activities come through COROS's official hosted
+[MCP server](https://coros.com/stories/coros-metrics/c/mcp-testing) — there's **no
+API application to create** and no client_id/secret. You authorize once with your
+normal COROS account, and the exporter renders your activities into the same
+Markdown as Strava.
+
+### CLI
+
+```bash
+pip install -r requirements.txt          # installs the `mcp` client SDK
+python coros_mcp_export.py               # opens the browser to authorize, then exports
+python coros_mcp_export.py --after 2026-01-01 --limit 20
+python coros_mcp_export.py --no-detail   # summary only (skip per-activity detail + laps)
+```
+
+The token is stored under `data/coros_mcp/` and reused (and refreshed) after that.
+Output goes to `data/coros_mcp/coros_all_activities.md`.
+
+### What's in the export
+
+COROS's MCP answers in ready-made human-readable prose, so the export keeps that
+text and adds a parsed **Overview** table on top:
+
+- **Overview table** — date, sport, location, distance, time, pace/speed, HR, calories.
+- **Per activity** (unless `--no-detail`): the full `getActivityDetail` text (HR,
+  pace, cadence, power, elevation, training load, …) plus **lap tables** — your
+  **manual (button) laps** first, then the 1 km auto splits, Strava-style. Detail
+  costs one extra call per activity, so use `--after`/`--limit` for long histories.
+
+**Region:** COROS routes each account to a regional MCP endpoint; the default is
+EU (`mcpeu.coros.com`). For another region set `COROS_MCP_URL` (or `--mcp-url`) to
+the host named in a `Protected resource … does not match …` error.
+
+Diagnostics: `--list-tools` (all tools + schemas), `--raw` (dump a tool result),
+`--tool <name> --json '{…}'` (call a specific tool with exact arguments).
+
+### Web server
+
+`server.py` shows a **Connect COROS** button that runs the same authorization in
+your browser and then serves `GET /coros/export` (add `?detail=0` for summary
+only). You can also authorize once via the CLI above; the server reuses the token
+in `data/coros_mcp/`.
+
 ## Options
 
 ```text

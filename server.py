@@ -11,6 +11,12 @@ is shared across users (Strava activity IDs are globally unique).
 If STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET are set in the environment, that user
 is pre-registered and used as the default when no clientId is given.
 
+COROS is also supported via the official COROS MCP (see coros_mcp_export.py):
+"Connect COROS" on the home page authorizes with a COROS account (no per-user
+client id — one operator account, token stored under data/coros_mcp/), then:
+
+    GET /coros/export[?after=YYYY-MM-DD&before=...&limit=N&detail=0]
+
 Run:
     python server.py            # listens on $PORT (default 8000)
 """
@@ -21,7 +27,7 @@ import logging
 import os
 from datetime import date, timedelta
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -30,6 +36,7 @@ from strava_export import (
     AUTHORIZE_URL, SCOPE, DailyLimitReached, RateLimited, StravaAuth, StravaClient,
     load_detail, parse_date, render_activity, render_combined, user_dir,
 )
+import coros_mcp_export as coros
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -37,6 +44,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 CACHE_DIR = DATA_DIR / "cache"  # shared across users
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# COROS connects once via the official MCP (the operator's own COROS account),
+# so it isn't per-user like Strava — tokens + reports live in one directory.
+COROS_DIR = DATA_DIR / coros.COROS_SUBDIR
 
 
 # -- per-user storage -------------------------------------------------------
@@ -148,24 +159,27 @@ _GITHUB_LINK = f"""<p><a class="gh" href="{_REPO_URL}" target="_blank" rel="noop
   </svg>View on GitHub</a></p>"""
 
 _PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Strava to LLM</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Strava &amp; COROS to LLM</title>
 <style>
- body{font-family:system-ui,-apple-system,sans-serif;max-width:560px;margin:64px auto;padding:0 20px;line-height:1.6;color:#1a1a1a}
- h2{font-weight:600}
+ body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:56px auto;padding:0 20px;line-height:1.6;color:#1a1a1a}
+ h1{font-weight:700;font-size:26px;margin:0 0 6px}
+ h2{font-weight:600;margin:0 0 10px}
+ .cards{display:flex;flex-wrap:wrap;gap:20px;margin-top:28px}
+ .card{flex:1 1 320px;--accent:#fc4c02;border:1px solid #eee;border-radius:14px;padding:22px 22px 26px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+ .card.coros{--accent:#111}
  input{width:100%;padding:11px 12px;margin:6px 0;border:1px solid #ddd;border-radius:8px;font-size:15px;box-sizing:border-box}
- input:focus{outline:none;border-color:#fc4c02}
- button{padding:11px 22px;background:#fc4c02;color:#fff;border:0;border-radius:8px;font-size:15px;cursor:pointer}
- button:hover{background:#e34402}
+ input:focus{outline:none;border-color:var(--accent)}
+ .btn{display:inline-block;padding:11px 22px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-size:15px;cursor:pointer;text-decoration:none}
+ .btn:hover{filter:brightness(.92)}
  a{color:#fc4c02}
+ .card.coros a:not(.btn){color:#111}
  .logout{margin-left:auto;padding:6px 12px;border:1px solid #ddd;border-radius:6px;color:#666;text-decoration:none;font-size:13px;white-space:nowrap}
- .logout:hover{border-color:#fc4c02;color:#fc4c02}
- .avatar{width:56px;height:56px;border-radius:50%;object-fit:cover}
+ .logout:hover{border-color:var(--accent);color:var(--accent)}
+ .avatar{width:52px;height:52px;border-radius:50%;object-fit:cover}
  .ex{list-style:none;padding:0;margin:0}
  .ex li{margin:12px 0}
  .ex a{word-break:break-all}
  code{background:#f4f4f4;padding:1px 5px;border-radius:4px}
- table{border-collapse:collapse;margin:14px 0}
- td{padding:4px 20px 4px 0}td:first-child{color:#888}
  .muted{color:#888;font-size:14px}
  .gh{display:inline-flex;align-items:center;gap:7px;color:#888;text-decoration:none;font-size:14px;margin-top:44px}
  .gh:hover{color:#1a1a1a}
@@ -174,52 +188,75 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8">
 </body></html>"""
 
 
-def _login_page(cid: str) -> str:
-    body = f"""<h2>Connect Strava</h2>
-    <p>Export your activities and analyze your training with an LLM. Enter your Strava API app
-      credentials (<a href="https://www.strava.com/settings/api" target="_blank">create one here</a> —
-      set the callback domain to this server's host):</p>
-    <form action="/register" method="post">
-      <input name="client_id" placeholder="Client ID" value="{cid}" required>
-      <input name="client_secret" placeholder="Client Secret" required>
-      <p><button type="submit">Connect Strava</button></p>
-    </form>
-    {_GITHUB_LINK}"""
-    return _PAGE.replace("{body}", body)
-
-
-def _profile_page(cid: str, athlete: dict | None, base_url: str) -> str:
+def _example_links(export_url: str) -> str:
     today = date.today()
-    base = f"{base_url}/export?clientId={cid}"
+    sep = "&" if "?" in export_url else "?"
     examples = [
-        ("Last activity only", f"{base}&limit=1"),
-        ("Last week", f"{base}&after={(today - timedelta(days=7)).isoformat()}"),
-        ("This year", f"{base}&after={today.year}-01-01"),
+        ("Last activity only", f"{export_url}{sep}limit=1"),
+        ("Last week", f"{export_url}{sep}after={(today - timedelta(days=7)).isoformat()}"),
+        ("This year", f"{export_url}{sep}after={today.year}-01-01"),
     ]
     links = "".join(f'<li><b>{label}</b><br><a href="{url}">{url}</a></li>' for label, url in examples)
-    logout = '<a class="logout" href="/logout">Log out</a>'
+    return ('<p style="margin-top:20px;">Example links — open one, or hand it to your LLM:</p>'
+            f'<ul class="ex">{links}</ul>')
 
+
+def _strava_card(cid: str, athlete: dict | None, base_url: str) -> str:
+    if not cid or not _connected(cid):
+        body = f"""<h2>Connect Strava</h2>
+      <p>Enter your Strava API app credentials
+        (<a href="https://www.strava.com/settings/api" target="_blank">create one here</a> —
+        set the callback domain to this server's host):</p>
+      <form action="/register" method="post">
+        <input name="client_id" placeholder="Client ID" value="{cid}" required>
+        <input name="client_secret" placeholder="Client Secret" required>
+        <p><button class="btn" type="submit">Connect Strava</button></p>
+      </form>"""
+        return f'<div class="card">{body}</div>'
+
+    logout = '<a class="logout" href="/logout">Log out</a>'
     if athlete:
         name = " ".join(filter(None, [athlete.get("firstname"), athlete.get("lastname")])) or "—"
         avatar = athlete.get("profile") or athlete.get("profile_medium") or ""
         img = f'<img class="avatar" src="{avatar}" alt="">' if avatar.startswith("http") else ""
         header = f"""<div style="display:flex;align-items:center;gap:14px;">{img}
-      <div><div style="font-size:22px;font-weight:600;">{name}</div>
-        <div class="muted">Athlete {athlete.get("id")} · Client {cid}</div></div>{logout}</div>"""
+      <div><div style="font-size:20px;font-weight:600;">{name}</div>
+        <div class="muted">Strava · Athlete {athlete.get("id")}</div></div>{logout}</div>"""
     else:
         header = (f'<div style="display:flex;align-items:center;"><div><h2>Connected to Strava</h2>'
                   '<p class="muted">Profile couldn\'t be loaded — the token may need reconnecting.</p>'
                   f"</div>{logout}</div>")
+    links = _example_links(f"{base_url}/export?clientId={cid}")
+    return f'<div class="card">{header}{links}</div>'
 
-    body = f"""{header}
-    <p style="margin-top:28px;">Example links — open one, or hand it to your LLM:</p>
-    <ul class="ex">{links}</ul>"""
-    return _PAGE.replace("{body}", body)
+
+def _coros_card(base_url: str) -> str:
+    if not coros.is_connected(COROS_DIR):
+        body = """<h2>Connect COROS</h2>
+      <p>Connect with your normal COROS account through the official
+        <a href="https://coros.com/stories/coros-metrics/c/mcp-testing" target="_blank">COROS MCP</a> —
+        no API application needed. You'll be sent to COROS to authorize.</p>
+      <p><a class="btn" href="/coros/login">Connect COROS</a></p>
+      <p class="muted">Alternatively, authorize once from the terminal:
+        <code>python coros_mcp_export.py</code></p>"""
+        return f'<div class="card coros">{body}</div>'
+
+    logout = '<a class="logout" href="/coros/logout">Log out</a>'
+    header = (f'<div style="display:flex;align-items:center;">'
+              '<div><div style="font-size:20px;font-weight:600;">Connected to COROS</div>'
+              '<div class="muted">COROS · via official MCP</div></div>'
+              f'{logout}</div>')
+    links = _example_links(f"{base_url}/coros/export")
+    return f'<div class="card coros">{header}{links}</div>'
 
 
 async def index(request: web.Request) -> web.Response:
+    base_url = _base_url(request)
+    new = bool(request.query.get("new"))
+
     cid = request.query.get("clientId") or request.cookies.get("clientId") or DEFAULT_CLIENT_ID or ""
-    if cid and _connected(cid) and not request.query.get("new"):
+    athlete = None
+    if cid and _connected(cid) and not new:
         athlete = _load_athlete(cid)  # stored at connect time — no API call, no hang
         if athlete is None:  # older session: fetch once (fail-fast on rate limit) and cache
             try:
@@ -228,8 +265,14 @@ async def index(request: web.Request) -> web.Response:
                 _save_athlete(cid, athlete)
             except (Exception, SystemExit):
                 athlete = None
-        return web.Response(text=_profile_page(cid, athlete, _base_url(request)), content_type="text/html")
-    return web.Response(text=_login_page(cid), content_type="text/html")
+
+    strava_card = _strava_card("" if new else cid, athlete, base_url)
+    coros_card = _coros_card(base_url)
+    body = ('<h1>Export your activities to Markdown for an LLM</h1>'
+            '<p class="muted">Connect Strava, COROS, or both. Each export endpoint returns clean '
+            'Markdown you can hand to ChatGPT, Claude or any other model.</p>'
+            f'<div class="cards">{strava_card}{coros_card}</div>{_GITHUB_LINK}')
+    return web.Response(text=_PAGE.replace("{body}", body), content_type="text/html")
 
 
 async def register(request: web.Request) -> web.Response:
@@ -312,6 +355,97 @@ async def export(request: web.Request) -> web.Response:
     return web.Response(text=markdown, content_type="text/markdown")
 
 
+# -- COROS routes (official MCP) --------------------------------------------
+# COROS uses OAuth driven by the MCP SDK. We bridge its (redirect_handler,
+# callback_handler) pair — designed for a CLI — onto the web request/response
+# cycle: /coros/login starts a background connect task, hands the browser the
+# authorization URL, and /coros/callback feeds the returned code back to it.
+
+_coros_pending: dict[str, asyncio.Future] = {}  # OAuth state -> future of (code, state)
+_coros_connect_task: asyncio.Task | None = None
+
+
+async def coros_login(request: web.Request) -> web.Response:
+    if coros.is_connected(COROS_DIR):
+        raise web.HTTPFound("/")
+    loop = asyncio.get_running_loop()
+    auth_url_fut: asyncio.Future = loop.create_future()
+
+    async def redirect_handler(authorization_url: str) -> None:
+        state = parse_qs(urlparse(authorization_url).query).get("state", [None])[0]
+        code_fut: asyncio.Future = loop.create_future()
+        if state:
+            _coros_pending[state] = code_fut
+        if not auth_url_fut.done():
+            auth_url_fut.set_result((authorization_url, code_fut))
+
+    async def callback_handler() -> tuple[str, str | None]:
+        _url, code_fut = await auth_url_fut
+        return await code_fut
+
+    oauth = coros.make_oauth(COROS_DIR, redirect_uri=f"{_base_url(request)}/coros/callback",
+                             redirect_handler=redirect_handler, callback_handler=callback_handler)
+
+    async def _connect() -> None:
+        try:
+            async with coros.mcp_session(oauth) as session:
+                await session.list_tools()  # any authenticated call forces token storage
+        except Exception:
+            logging.exception("COROS connect failed")
+
+    global _coros_connect_task
+    _coros_connect_task = asyncio.create_task(_connect())
+    try:
+        authorization_url, _fut = await asyncio.wait_for(auth_url_fut, timeout=30)
+    except Exception as exc:
+        raise web.HTTPBadGateway(text=f"Could not start COROS authorization: {exc}")
+    raise web.HTTPFound(authorization_url)
+
+
+async def coros_callback(request: web.Request) -> web.Response:
+    error = request.query.get("error")
+    if error == "access_denied":
+        raise web.HTTPFound("/?new=1")  # user cancelled
+    if error or not request.query.get("code"):
+        raise web.HTTPBadRequest(text=f"Authorization failed: {error or 'no code returned'}")
+    state = request.query.get("state")
+    fut = _coros_pending.pop(state, None)
+    if fut is None:
+        raise web.HTTPBadRequest(text="Unexpected COROS callback — start again from the home page.")
+    if not fut.done():
+        fut.set_result((request.query["code"], state))
+    if _coros_connect_task is not None:
+        try:  # wait for the background task to exchange the code and store the token
+            await asyncio.wait_for(asyncio.shield(_coros_connect_task), timeout=30)
+        except Exception:
+            pass
+    raise web.HTTPFound("/")
+
+
+async def coros_logout(request: web.Request) -> web.Response:
+    for name in ("mcp_tokens.json", "mcp_client.json"):
+        path = COROS_DIR / name
+        if path.exists():
+            path.unlink()
+    raise web.HTTPFound("/?new=1")
+
+
+async def coros_export(request: web.Request) -> web.Response:
+    if not coros.is_connected(COROS_DIR):
+        raise web.HTTPUnauthorized(text="COROS not connected. Open the home page and connect COROS first.")
+    limit = int(request.query["limit"]) if request.query.get("limit") else None
+    detail = request.query.get("detail", "1") not in ("0", "false", "no")  # on by default
+    try:
+        markdown = await coros.collect_markdown(
+            COROS_DIR, after=request.query.get("after"), before=request.query.get("before"),
+            limit=limit, tool=request.query.get("tool"), detail=detail, interactive=False)
+    except web.HTTPException:
+        raise
+    except (Exception, SystemExit) as exc:
+        raise web.HTTPBadGateway(text=f"COROS request failed: {exc}")
+    return web.Response(text=markdown, content_type="text/markdown")
+
+
 def make_app() -> web.Application:
     app = web.Application()
     app.add_routes([
@@ -321,6 +455,10 @@ def make_app() -> web.Application:
         web.get("/logout", logout),
         web.get("/callback", callback),
         web.get("/export", export),
+        web.get("/coros/login", coros_login),
+        web.get("/coros/logout", coros_logout),
+        web.get("/coros/callback", coros_callback),
+        web.get("/coros/export", coros_export),
     ])
     return app
 

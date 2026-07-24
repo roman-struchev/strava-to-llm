@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY strava_export.py server.py ./
+COPY strava_export.py coros_mcp_export.py server.py ./
 
 EXPOSE 8000
 CMD ["python", "server.py"]
