@@ -528,8 +528,10 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
 
     data_dir: Path = args.data
-    cache_dir = data_dir / "cache"
+    cache_dir = data_dir / "cache" / "strava"
     cache_dir.mkdir(parents=True, exist_ok=True)
+    for legacy in (data_dir / "cache").glob("activity_*.json"):  # migrate old flat cache
+        legacy.replace(cache_dir / legacy.name)
 
     client_id = os.getenv("STRAVA_CLIENT_ID")
     out_dir = user_dir(data_dir, client_id)  # data/users/<clientId>/

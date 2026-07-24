@@ -677,7 +677,7 @@ async def run(args: argparse.Namespace) -> int:
                                        before=args.before, limit=args.limit,
                                        json_args=args.json, detail=args.detail,
                                        concurrency=args.concurrency,
-                                       cache_dir=args.data / "cache", refresh=args.refresh)
+                                       cache_dir=args.data / "cache" / "coros", refresh=args.refresh)
 
     store_dir.mkdir(parents=True, exist_ok=True)
     combined_path = store_dir / "coros_all_activities.md"

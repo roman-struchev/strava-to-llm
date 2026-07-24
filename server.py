@@ -550,7 +550,8 @@ def make_app() -> web.Application:
         web.get("/login", login),
         web.get("/logout", logout),
         web.get("/callback", callback),
-        web.get("/export", export),
+        web.get("/export", export),         # legacy alias
+        web.get("/strava/export", export),  # uniform with /coros/export
         web.get("/coros/login", coros_login),
         web.get("/coros/logout", coros_logout),
         web.get("/coros/callback", coros_callback),
