@@ -71,7 +71,8 @@ def _require_mcp():
 # match that regional resource. Default is the EU endpoint (mcpeu.coros.com);
 # override for another region via COROS_MCP_URL or --mcp-url (the correct host is
 # named in the "Protected resource ..." error if it ever mismatches).
-MCP_URL = os.getenv("COROS_MCP_URL", "https://mcpeu.coros.com/mcp")
+MCP_URL = os.getenv("COROS_MCP_URL") or "https://mcpeu.coros.com/mcp"
+_region_resolved = False
 DEFAULT_PORT = 8722
 COROS_SUBDIR = "coros_mcp"  # under the data dir: OAuth tokens + reports live here
 CALL_TIMEOUT = timedelta(seconds=180)  # a wide querySportRecords range can take ~20s+
@@ -201,6 +202,33 @@ def make_oauth(store_dir: Path, *, port: int = DEFAULT_PORT, redirect_uri: str |
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
     )
+
+
+async def resolve_mcp_url() -> str:
+    """Auto-detect COROS's regional MCP endpoint and point ``MCP_URL`` at it.
+
+    COROS advertises the canonical (regional) resource — e.g. mcpeu.coros.com — in
+    its protected-resource metadata, and the MCP SDK's OAuth flow refuses to run if
+    the URL we use doesn't match it. We read that metadata once and adopt it, so a
+    stale/region-mismatched configured URL still works. Cached after the first call.
+    """
+    global MCP_URL, _region_resolved
+    if _region_resolved:
+        return MCP_URL
+    import httpx
+    parsed = urlparse(MCP_URL)
+    well_known = f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-protected-resource{parsed.path}"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            resp = await client.get(well_known)
+        resource = resp.json().get("resource") if resp.status_code == 200 else None
+        if resource and str(resource) != MCP_URL:
+            log.info("COROS region resolved: %s → %s", MCP_URL, resource)
+            MCP_URL = str(resource)
+    except Exception as exc:
+        log.warning("COROS region resolution failed (%s); using %s", exc, MCP_URL)
+    _region_resolved = True
+    return MCP_URL
 
 
 @asynccontextmanager
@@ -585,6 +613,7 @@ async def collect_markdown(store_dir: Path, *, after=None, before=None, limit=No
     Used by both the CLI and the web server. With ``interactive=False`` a missing
     token raises instead of opening a browser — the server authorizes separately.
     """
+    await resolve_mcp_url()
     oauth = make_oauth(store_dir, redirect_uri=redirect_uri, interactive=interactive)
     async with mcp_session(oauth) as session:
         markdown = await gather_export(session, tool=tool, after=after, before=before,
@@ -598,6 +627,7 @@ async def collect_markdown(store_dir: Path, *, after=None, before=None, limit=No
 
 async def run(args: argparse.Namespace) -> int:
     store_dir: Path = args.data / COROS_SUBDIR
+    await resolve_mcp_url()
     oauth = make_oauth(store_dir, port=args.port, interactive=True)
 
     async with mcp_session(oauth) as session:

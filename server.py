@@ -408,9 +408,27 @@ _coros_pending: dict[str, asyncio.Future] = {}  # OAuth state -> future of (code
 _coros_connect_task: asyncio.Task | None = None
 
 
+def _flatten_error(exc: BaseException | None) -> str:
+    """Collapse a (possibly nested) ExceptionGroup into a concise one-line message."""
+    if exc is None:
+        return "unknown error"
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(_flatten_error(e) for e in exc.exceptions)
+    return str(exc)
+
+
 async def coros_login(request: web.Request) -> web.Response:
     if coros.is_connected(COROS_DIR):
         raise web.HTTPFound("/")
+    base = _base_url(request)
+    parsed = urlparse(base)
+    # COROS's OAuth server rejects non-HTTPS callbacks except for loopback hosts.
+    if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1"):
+        raise web.HTTPBadRequest(text=(
+            f"COROS requires an HTTPS callback for remote hosts like '{parsed.hostname}'. "
+            f"Open this page via http://localhost:{parsed.port or 80} (loopback http is allowed), "
+            "or serve the app behind HTTPS."))
+
     loop = asyncio.get_running_loop()
     auth_url_fut: asyncio.Future = loop.create_future()
 
@@ -426,23 +444,25 @@ async def coros_login(request: web.Request) -> web.Response:
         _url, code_fut = await auth_url_fut
         return await code_fut
 
-    oauth = coros.make_oauth(COROS_DIR, redirect_uri=f"{_base_url(request)}/coros/callback",
+    await coros.resolve_mcp_url()  # adopt COROS's regional endpoint before authorizing
+    oauth = coros.make_oauth(COROS_DIR, redirect_uri=f"{base}/coros/callback",
                              redirect_handler=redirect_handler, callback_handler=callback_handler)
 
     async def _connect() -> None:
-        try:
-            async with coros.mcp_session(oauth) as session:
-                await session.list_tools()  # any authenticated call forces token storage
-        except Exception:
-            logging.exception("COROS connect failed")
+        async with coros.mcp_session(oauth) as session:
+            await session.list_tools()  # any authenticated call forces token storage
 
     global _coros_connect_task
     _coros_connect_task = asyncio.create_task(_connect())
-    try:
-        authorization_url, _fut = await asyncio.wait_for(auth_url_fut, timeout=30)
-    except Exception as exc:
-        raise web.HTTPBadGateway(text=f"Could not start COROS authorization: {exc}")
-    raise web.HTTPFound(authorization_url)
+    # Whichever comes first: the authorization URL to redirect to, or a connect failure.
+    done, _pending = await asyncio.wait({auth_url_fut, _coros_connect_task},
+                                        timeout=45, return_when=asyncio.FIRST_COMPLETED)
+    if auth_url_fut in done:
+        authorization_url, _fut = auth_url_fut.result()
+        raise web.HTTPFound(authorization_url)
+    if _coros_connect_task in done:  # finished before yielding a URL → it errored
+        raise web.HTTPBadGateway(text=f"COROS authorization failed: {_flatten_error(_coros_connect_task.exception())}")
+    raise web.HTTPBadGateway(text="COROS authorization timed out — try again.")
 
 
 async def coros_callback(request: web.Request) -> web.Response:

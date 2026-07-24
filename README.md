@@ -183,8 +183,14 @@ Diagnostics: `--list-tools` (all tools + schemas), `--raw` (dump a tool result),
 `server.py` shows a **Connect COROS** button that runs the same authorization in
 your browser and then serves `GET /coros/export` (add `?detail=0` for summary
 only). On the home page the **Last activity** link has a **📋 Copy** button that
-fetches the export and copies the Markdown straight to your clipboard. You can also
-authorize once via the CLI above; the server reuses the token in `data/coros_mcp/`.
+copies the export Markdown straight to your clipboard. You can also authorize once
+via the CLI above; the server reuses the token in `data/coros_mcp/`.
+
+**Open the UI at `http://localhost:PORT`, not `http://0.0.0.0:PORT`.** COROS's OAuth
+only accepts non-HTTPS callback URLs for loopback hosts, and browsers only expose
+the clipboard on a secure context — `localhost` satisfies both; `0.0.0.0` fails at
+both. **When deploying to a server, put it behind HTTPS** (a reverse proxy that
+forwards `X-Forwarded-Proto`/`X-Forwarded-Host`); then Connect and Copy both work.
 
 ## Options
 

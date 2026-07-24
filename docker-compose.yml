@@ -8,7 +8,8 @@ services:
     environment:
       STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
       STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET}
-      # COROS MCP endpoint; set to your region (EU: https://mcpeu.coros.com/mcp).
-      COROS_MCP_URL: ${COROS_MCP_URL:-https://mcp.coros.com/mcp}
+      # COROS MCP endpoint. The region is auto-detected from COROS's metadata, so
+      # this is only an override; set it to your region if detection ever fails.
+      COROS_MCP_URL: ${COROS_MCP_URL:-https://mcpeu.coros.com/mcp}
     volumes:
       - ./data:/app/data     # per-user secrets/tokens/reports + shared cache
