@@ -172,7 +172,8 @@ text and adds a parsed **Overview** table on top:
 - **Per activity** (unless `--no-detail`): the full `getActivityDetail` text — HR,
   pace, **grade-adjusted pace**, cadence, power, stride, **elevation gain/loss**,
   training load — plus **lap tables**: your **manual (button) laps** first, then the
-  1 km auto splits, Strava-style. Detail costs two calls per activity, run
+  auto splits, Strava-style — 1 km for running/swimming, 5 km for cycling (with
+  average speed instead of pace). Detail costs two calls per activity, run
   concurrently across activities (`--concurrency`, default 6); use `--after`/`--limit`
   for long histories.
 

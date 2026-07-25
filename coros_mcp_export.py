@@ -11,7 +11,8 @@ export keeps that text verbatim and adds a parsed Overview table on top:
     # COROS export
     ## Overview     — one row per activity (date, sport, distance, time, pace, HR…)
     ## Activities   — each activity in full: its summary, then getActivityDetail
-                      prose, then lap tables (manual/button laps + 1 km splits)
+                      prose, then lap tables (manual/button laps + auto splits:
+                      1 km for running/swimming, 5 km for cycling)
 
 Usage:
     python coros_mcp_export.py                     # authorize (first run), then export
@@ -489,6 +490,7 @@ _LAP_COLUMNS = [
     ("distance", "Distance", lambda v: f"{float(v) / 100000:.2f} km"),
     ("time", "Time", _lap_clock),
     ("avgPace", "Pace", _lap_pace),
+    ("avgSpeedV2", "Speed", lambda v: f"{float(v) / 100:.1f} km/h"),  # hundredths of km/h
     ("avgHr", "Avg HR", lambda v: str(int(v))),
     ("maxHr", "Max HR", lambda v: str(int(v))),
     ("avgPower", "Power", lambda v: f"{int(v)} W"),
@@ -511,9 +513,14 @@ def _lap_group_label(group: dict) -> str:
 
 
 def _laps_table(laps: list[dict]) -> list[str]:
-    """Markdown table rows for one group's laps (columns kept only if they carry data)."""
+    """Markdown table rows for one group's laps (columns kept only if they carry data).
+
+    Pace and speed are the same number twice, so only one is shown: pace where COROS
+    reports it (running, swimming), speed where it doesn't (cycling)."""
+    has_pace = any(lap.get("avgPace") for lap in laps)
     cols = [(n, h, f) for (n, h, f) in _LAP_COLUMNS
-            if n in ("lapIndex", "distance", "time") or any(lap.get(n) for lap in laps)]
+            if (n in ("lapIndex", "distance", "time") or any(lap.get(n) for lap in laps))
+            and not (n == "avgSpeedV2" and has_pace)]
     rows = ["| " + " | ".join(h for _, h, _ in cols) + " |",
             "|" + "|".join("---" for _ in cols) + "|"]
     for lap in laps:
@@ -528,6 +535,30 @@ def _laps_table(laps: list[dict]) -> list[str]:
     return rows
 
 
+def _is_cycling(payload: dict) -> bool:
+    """COROS sport types: 1xx run, 2xx bike, 3xx swim."""
+    try:
+        return 200 <= int(payload.get("sportType")) < 300
+    except (TypeError, ValueError):
+        return False
+
+
+# On a bike 1 km splits are noise (dozens of near-identical rows), so prefer these.
+CYCLING_AUTO_LAP_CM = 500000  # 5 km, in the cm COROS uses for lap distances
+
+
+def _pick_auto_group(autos: list, cycling: bool) -> list:
+    """The single auto-lap group to render, from ``autos`` sorted by lap distance:
+    5 km or coarser for cycling, the finest split for everything else. Falls back to
+    the finest group when the preferred distance isn't in the data."""
+    if cycling:
+        coarse = [lg for lg in autos
+                  if (lg[1].get("laps") or [{}])[0].get("distance", 0) >= CYCLING_AUTO_LAP_CM]
+        if coarse:
+            return coarse[:1]
+    return autos[:1]
+
+
 def _render_laps(payload) -> str:
     """Render COROS lap JSON into Strava-style Markdown tables (empty str if none).
 
@@ -540,8 +571,8 @@ def _render_laps(payload) -> str:
     manual = [(lbl, g) for lbl, g in groups if lbl == "Manual laps"]
     autos = sorted((lg for lg in groups if lg[0] != "Manual laps"),
                    key=lambda lg: (lg[1].get("laps") or [{}])[0].get("distance", 1 << 60))
-    # Manual (button) laps first, then only the finest auto splits (drop coarse 5/10 km).
-    chosen = manual + autos[:1]
+    # Manual (button) laps first, then one auto-split group (the rest are redundant).
+    chosen = manual + _pick_auto_group(autos, _is_cycling(payload))
     blocks: list[str] = []
     for label, group in chosen:
         blocks += [f"### {label}", "", *_laps_table(group["laps"]), ""]
