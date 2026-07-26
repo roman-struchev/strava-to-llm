@@ -397,17 +397,16 @@ def _humanize_timestamps(text: str) -> str:
 
 # Fields dropped from COROS prose as low-value for analysis.
 _STRIP_LABELS = ("Calories", "Max Power", "Max Cadence")
+_LABEL_ALT = "|".join(re.escape(lbl) for lbl in _STRIP_LABELS)
+_STRIP_LINE_RE = re.compile(rf"\s*(?:{_LABEL_ALT})\s*:", re.I)          # a whole "Label: value" line
+_STRIP_INLINE_RE = re.compile(rf"\s*\|\s*(?:{_LABEL_ALT})\s*:[^|\n]*", re.I)  # a "| Label: value" segment
 
 
 def _strip_fields(text: str) -> str:
     """Remove unwanted metrics from COROS prose, both as full ``Label: value`` lines
     and as inline ``| Label: value`` segments (e.g. in the summary's pace line)."""
-    kept = [ln for ln in (text or "").splitlines()
-            if not any(re.match(rf"\s*{re.escape(lbl)}\s*:", ln, re.I) for lbl in _STRIP_LABELS)]
-    out = "\n".join(kept)
-    for lbl in _STRIP_LABELS:
-        out = re.sub(rf"\s*\|\s*{re.escape(lbl)}\s*:[^|\n]*", "", out, flags=re.I)
-    return out
+    kept = [ln for ln in (text or "").splitlines() if not _STRIP_LINE_RE.match(ln)]
+    return _STRIP_INLINE_RE.sub("", "\n".join(kept))
 
 
 def _grab(block: str, pattern: str) -> str:

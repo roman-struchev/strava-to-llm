@@ -27,6 +27,7 @@ import logging
 import os
 import secrets
 from datetime import date, timedelta
+from html import escape
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -35,7 +36,7 @@ from dotenv import load_dotenv
 
 from strava_export import (
     AUTHORIZE_URL, SCOPE, DailyLimitReached, RateLimited, StravaAuth, StravaClient,
-    load_detail, parse_date, render_activity, render_combined, user_dir,
+    iter_details, parse_date, render_activity, render_combined, user_dir,
 )
 import coros_mcp_export as coros
 
@@ -65,6 +66,16 @@ def _coros_dir(client_id: str) -> Path:
     if not safe:
         raise web.HTTPBadRequest(text="Invalid COROS clientId.")
     return COROS_DIR / safe
+
+
+def _coros_connected(client_id: str | None) -> bool:
+    """True if this (untrusted) client id names a COROS connection with tokens."""
+    if not client_id:
+        return False
+    try:
+        return (_coros_dir(client_id) / "mcp_tokens.json").exists()
+    except web.HTTPBadRequest:
+        return False
 
 
 # -- per-user storage -------------------------------------------------------
@@ -120,6 +131,20 @@ if DEFAULT_CLIENT_ID and os.getenv("STRAVA_CLIENT_SECRET"):
     _save_secret(DEFAULT_CLIENT_ID, os.getenv("STRAVA_CLIENT_SECRET"))
 
 
+def _int_param(request: web.Request, name: str) -> int | None:
+    """Parse a positive integer query param, or None if absent."""
+    raw = request.query.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise web.HTTPBadRequest(text=f"Invalid {name!r}: expected a number, got {raw!r}.")
+    if value < 1:
+        raise web.HTTPBadRequest(text=f"Invalid {name!r}: must be 1 or more.")
+    return value
+
+
 def _base_url(request: web.Request) -> str:
     """Public base URL, honouring a reverse proxy's forwarding headers."""
     proto = request.headers.get("X-Forwarded-Proto", request.scheme)
@@ -135,10 +160,15 @@ def _collect(client_id: str, after: int | None, before: int | None, limit: int |
     Uses wait_on_limit=False so it never blocks the HTTP response. If Strava's
     rate limit is hit mid-export, it returns whatever was fetched so far plus a
     note; cached activities make a follow-up request pick up the rest. Only when
-    even the athlete can't be loaded does the limit propagate (handled as 429).
+    not even the activity list can be fetched does the limit propagate (as 429).
     """
     client = StravaClient(_auth_for(client_id), wait_on_limit=False)
-    athlete = client.get_athlete()  # if this is rate-limited, the caller returns 429
+    # The athlete is stored at connect time, so the export normally spends none of
+    # the rate-limit budget on it; only an older session still needs the call.
+    athlete = _load_athlete(client_id)
+    if athlete is None:
+        athlete = client.get_athlete()
+        _save_athlete(client_id, athlete)
 
     summaries: list[dict] = []
     detailed, sections = [], []
@@ -148,9 +178,13 @@ def _collect(client_id: str, after: int | None, before: int | None, limit: int |
             summaries.append(summary)
             if limit and len(summaries) >= limit:
                 break
-        for summary in summaries:
-            detail, zones = load_detail(client, summary, CACHE_DIR, refresh=False,
-                                        fetch_zones=bool(summary.get("has_heartrate")))
+    except (RateLimited, DailyLimitReached):
+        if not summaries:
+            raise  # nothing at all to show — let the caller answer 429
+        truncated = True  # keep going: the pages we did get may be cached in full
+
+    try:
+        for detail, zones in iter_details(client, summaries, CACHE_DIR):
             detailed.append(detail)
             sections.append(render_activity(detail, zones))
     except (RateLimited, DailyLimitReached):
@@ -259,9 +293,12 @@ def _example_links(export_url: str, recent_last: bool = False) -> str:
     ]
     items = []
     for label, url, copyable in examples:
-        copy_btn = (f'<button type="button" class="copy" onclick="copyExport(this, \'{url}\')">📋 Copy</button>'
+        # escape() with quote=True also covers ' — the URL sits inside a JS string
+        # literal within a double-quoted attribute.
+        safe = escape(url)
+        copy_btn = (f'<button type="button" class="copy" onclick="copyExport(this, \'{safe}\')">📋 Copy</button>'
                     if copyable else "")
-        items.append(f'<li><a href="{url}">{label}</a>{copy_btn}</li>')
+        items.append(f'<li><a href="{safe}">{label}</a>{copy_btn}</li>')
     return f'<ul class="ex" style="margin-top:20px;">{"".join(items)}</ul>'
 
 
@@ -272,7 +309,7 @@ def _strava_card(cid: str, athlete: dict | None, base_url: str) -> str:
         (<a href="https://www.strava.com/settings/api" target="_blank">create one here</a> —
         set the callback domain to this server's host):</p>
       <form action="/register" method="post">
-        <input name="client_id" placeholder="Client ID" value="{cid}" required>
+        <input name="client_id" placeholder="Client ID" value="{escape(cid)}" required>
         <input name="client_secret" placeholder="Client Secret" required>
         <p><button class="btn" type="submit">Connect Strava</button></p>
       </form>"""
@@ -281,11 +318,11 @@ def _strava_card(cid: str, athlete: dict | None, base_url: str) -> str:
     logout = '<a class="logout" href="/logout">Log out</a>'
     if athlete:
         name = " ".join(filter(None, [athlete.get("firstname"), athlete.get("lastname")])) or "—"
-        avatar = athlete.get("profile") or athlete.get("profile_medium") or ""
-        img = f'<img class="avatar" src="{avatar}" alt="">' if avatar.startswith("http") else ""
+        avatar = str(athlete.get("profile") or athlete.get("profile_medium") or "")
+        img = f'<img class="avatar" src="{escape(avatar)}" alt="">' if avatar.startswith("http") else ""
         header = f"""<div style="display:flex;align-items:center;gap:14px;">{img}
-      <div><div style="font-size:20px;font-weight:600;">{name}</div>
-        <div class="muted">Strava · Athlete {athlete.get("id")}</div></div>{logout}</div>"""
+      <div><div style="font-size:20px;font-weight:600;">{escape(name)}</div>
+        <div class="muted">Strava · Athlete {escape(str(athlete.get("id")))}</div></div>{logout}</div>"""
     else:
         header = (f'<div style="display:flex;align-items:center;"><div><h2>Connected to Strava</h2>'
                   '<p class="muted">Profile couldn\'t be loaded — the token may need reconnecting.</p>'
@@ -295,8 +332,7 @@ def _strava_card(cid: str, athlete: dict | None, base_url: str) -> str:
 
 
 def _coros_card(base_url: str, client_id: str) -> str:
-    connected = bool(client_id) and (COROS_DIR / client_id / "mcp_tokens.json").exists()
-    if not connected:
+    if not _coros_connected(client_id):
         body = """<h2>Connect COROS</h2>
       <p>Connect with your normal COROS account through the official
         <a href="https://coros.com/stories/coros-metrics/c/mcp-testing" target="_blank">COROS MCP</a> —
@@ -306,7 +342,7 @@ def _coros_card(base_url: str, client_id: str) -> str:
         <code>python coros_mcp_export.py</code></p>"""
         return f'<div class="card coros">{body}</div>'
 
-    logout = f'<a class="logout" href="/coros/logout?clientId={client_id}">Log out</a>'
+    logout = f'<a class="logout" href="/coros/logout?clientId={escape(client_id)}">Log out</a>'
     header = (f'<div style="display:flex;align-items:center;">'
               '<div><div style="font-size:20px;font-weight:600;">Connected to COROS</div>'
               '<div class="muted">COROS · via official MCP</div></div>'
@@ -331,7 +367,10 @@ async def index(request: web.Request) -> web.Response:
             except (Exception, SystemExit):
                 athlete = None
 
-    ccid = request.query.get("clientId") or request.cookies.get("corosClientId") or ""
+    # ?clientId= is shared by both providers, so it only wins for COROS when it
+    # actually names a COROS connection; otherwise the cookie stands.
+    qid = request.query.get("clientId") or ""
+    ccid = qid if _coros_connected(qid) else (request.cookies.get("corosClientId") or "")
     strava_card = _strava_card("" if new else cid, athlete, base_url)
     coros_card = _coros_card(base_url, "" if new else ccid)
     body = ('<h1>Export your activities to Markdown for an LLM</h1>'
@@ -405,7 +444,7 @@ async def export(request: web.Request) -> web.Response:
         before = parse_date(request.query.get("before"))
     except SystemExit as exc:
         raise web.HTTPBadRequest(text=str(exc))
-    limit = int(request.query["limit"]) if request.query.get("limit") else None
+    limit = _int_param(request, "limit")
 
     try:
         markdown = await asyncio.to_thread(_collect, client_id, after, before, limit)
@@ -451,6 +490,11 @@ async def coros_login(request: web.Request) -> web.Response:
             f"Open this page via http://localhost:{parsed.port or 80} (loopback http is allowed), "
             "or serve the app behind HTTPS."))
 
+    # Drop finished/abandoned flows (browser closed at COROS's consent screen)
+    # so the pending map can't grow without bound.
+    for state in [s for s, e in _coros_pending.items() if e["task"] and e["task"].done()]:
+        del _coros_pending[state]
+
     client_id = secrets.token_urlsafe(9)  # capability id for this connection (the export key)
     store_dir = COROS_DIR / client_id
     loop = asyncio.get_running_loop()
@@ -461,6 +505,7 @@ async def coros_login(request: web.Request) -> web.Response:
         state = parse_qs(urlparse(authorization_url).query).get("state", [None])[0]
         code_fut: asyncio.Future = loop.create_future()
         holder["code_fut"] = code_fut
+        holder["state"] = state
         if state:
             _coros_pending[state] = {"code_fut": code_fut, "task": holder.get("task")}
         if not auth_url_fut.done():
@@ -486,8 +531,10 @@ async def coros_login(request: web.Request) -> web.Response:
         resp = web.HTTPFound(auth_url_fut.result())
         resp.set_cookie("corosClientId", client_id, max_age=31536000, httponly=True, samesite="Lax")
         raise resp
+    _coros_pending.pop(holder.get("state"), None)  # this flow never got off the ground
     if task in done:  # finished before yielding a URL → it errored
         raise web.HTTPBadGateway(text=f"COROS authorization failed: {_flatten_error(task.exception())}")
+    task.cancel()  # nothing will ever feed it a code
     raise web.HTTPBadGateway(text="COROS authorization timed out — try again.")
 
 
@@ -532,7 +579,7 @@ async def coros_export(request: web.Request) -> web.Response:
     store_dir = _coros_dir(client_id)
     if not coros.is_connected(store_dir):
         raise web.HTTPUnauthorized(text="Not connected. Open the home page and connect this COROS clientId first.")
-    limit = int(request.query["limit"]) if request.query.get("limit") else None
+    limit = _int_param(request, "limit")
     detail = request.query.get("detail", "1") not in ("0", "false", "no")  # on by default
     try:
         markdown = await coros.collect_markdown(

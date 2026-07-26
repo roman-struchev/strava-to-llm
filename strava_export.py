@@ -19,9 +19,11 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import webbrowser
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -37,6 +39,9 @@ TOKEN_URL = "https://www.strava.com/oauth/token"
 API_BASE = "https://www.strava.com/api/v3"
 SCOPE = "activity:read_all"  # read-only, includes private activities
 RATE_WINDOW_SECONDS = 15 * 60
+# Per-activity detail/zone requests run in a small thread pool. Strava limits
+# request *count*, not concurrency, so this only cuts wall-clock time.
+DETAIL_WORKERS = 4
 
 
 class DailyLimitReached(Exception):
@@ -97,6 +102,9 @@ class StravaAuth:
         self.redirect_uri = f"http://localhost:{port}"
         self.session = session or requests.Session()
         self._tokens: dict | None = None
+        # Strava rotates the refresh token on every refresh, so two threads
+        # refreshing at once would invalidate each other's copy.
+        self._lock = threading.Lock()
 
     def get_access_token(self) -> str:
         """Return a valid access token, running the OAuth flow if needed.
@@ -104,17 +112,18 @@ class StravaAuth:
         Tokens are cached in memory and only loaded/saved when they actually
         change, so repeated API calls don't touch the disk every time.
         """
-        if self._tokens is None:
-            self._tokens = self._load()
-        if self._tokens is None:
-            log.info("No cached tokens — starting interactive authorization.")
-            self._tokens = self._exchange_code(self._capture_code())
-            self._save(self._tokens)
-        elif time.time() >= self._tokens["expires_at"] - 60:  # refresh a minute early
-            log.info("Access token expired — refreshing.")
-            self._tokens = self._refresh(self._tokens["refresh_token"])
-            self._save(self._tokens)
-        return self._tokens["access_token"]
+        with self._lock:
+            if self._tokens is None:
+                self._tokens = self._load()
+            if self._tokens is None:
+                log.info("No cached tokens — starting interactive authorization.")
+                self._tokens = self._exchange_code(self._capture_code())
+                self._save(self._tokens)
+            elif time.time() >= self._tokens["expires_at"] - 60:  # refresh a minute early
+                log.info("Access token expired — refreshing.")
+                self._tokens = self._refresh(self._tokens["refresh_token"])
+                self._save(self._tokens)
+            return self._tokens["access_token"]
 
     def authorize_with_code(self, code: str) -> dict:
         """Exchange an OAuth authorization code for tokens, persist and return them.
@@ -122,9 +131,10 @@ class StravaAuth:
         Used by the web server's /callback, which captures the code itself. The
         returned dict includes Strava's ``athlete`` object on first authorization.
         """
-        self._tokens = self._exchange_code(code)
-        self._save(self._tokens)
-        return self._tokens
+        with self._lock:
+            self._tokens = self._exchange_code(code)
+            self._save(self._tokens)
+            return self._tokens
 
     def _load(self) -> dict | None:
         if not self.token_path.exists():
@@ -502,6 +512,37 @@ def load_detail(client: StravaClient, summary: dict, cache_dir: Path,
     return detail, zones
 
 
+def iter_details(client: StravaClient, summaries: list[dict], cache_dir: Path, *,
+                 refresh: bool = False, fetch_zones: bool = True,
+                 workers: int = DETAIL_WORKERS) -> Iterator[tuple[dict, list]]:
+    """Yield ``(detail, zones)`` per summary, in order, fetching several at a time.
+
+    Each activity costs 1–2 round trips that are almost entirely network wait, so
+    a small thread pool cuts a long export's wall-clock time several-fold without
+    changing how many requests Strava sees.
+
+    A rate-limit error propagates *after* every activity that finished ahead of it
+    has been yielded, so callers still get a usable contiguous partial export —
+    and anything fetched past that point is already on disk for the next run.
+    """
+    def one(summary: dict) -> tuple[dict, list]:
+        return load_detail(client, summary, cache_dir, refresh,
+                           fetch_zones and bool(summary.get("has_heartrate")))
+
+    if workers <= 1:
+        for summary in summaries:
+            yield one(summary)
+        return
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # Submit in chunks: on a rate limit we stop after the current chunk
+        # instead of having queued every remaining activity behind it.
+        for start in range(0, len(summaries), workers):
+            futures = [pool.submit(one, s) for s in summaries[start:start + workers]]
+            for future in futures:
+                yield future.result()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Export your Strava activities into LLM-friendly Markdown.")
     p.add_argument("--data", type=Path, default=Path("data"),
@@ -516,6 +557,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-zones", action="store_true",
                    help="Skip the heart-rate/power zones request per activity (halves API calls).")
     p.add_argument("--no-per-activity", action="store_true", help="Write only the combined file.")
+    p.add_argument("--workers", type=int, default=DETAIL_WORKERS,
+                   help=f"Parallel per-activity requests (default: {DETAIL_WORKERS}, 1 = sequential). "
+                        "Doesn't change how many requests Strava counts, only how fast they're made.")
     p.add_argument("--port", type=int, default=8721, help="Local OAuth callback port (default: 8721).")
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
     return p
@@ -566,14 +610,15 @@ def main(argv: list[str] | None = None) -> int:
             (per_dir / activity_filename(activity)).write_text(md)
 
     try:
-        for i, summary in enumerate(summaries, start=1):
-            if args.summary_only:
+        if args.summary_only:
+            for summary in summaries:
                 emit(summary, [])
-                continue
-            fetch_zones = not args.no_zones and bool(summary.get("has_heartrate"))
-            detail, zones = load_detail(client, summary, cache_dir, args.refresh, fetch_zones)
-            emit(detail, zones)
-            log.info("  [%d/%d] %s", i, len(summaries), detail.get("name", "?"))
+        else:
+            details = iter_details(client, summaries, cache_dir, refresh=args.refresh,
+                                   fetch_zones=not args.no_zones, workers=args.workers)
+            for i, (detail, zones) in enumerate(details, start=1):
+                emit(detail, zones)
+                log.info("  [%d/%d] %s", i, len(summaries), detail.get("name", "?"))
     except DailyLimitReached:
         stopped_early = True
         log.warning("\n⏳ Strava daily API quota reached after %d/%d activities.",

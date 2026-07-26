@@ -218,6 +218,7 @@ python strava_export.py [options]
       --summary-only      Quick mode: just the activity list, no splits/zones/laps
       --no-zones          Skip heart-rate/power zones (downloads twice as fast)
       --no-per-activity   Only write the combined file
+      --workers N         Activities downloaded in parallel (default: 4, 1 = one at a time)
       --port N            Port for the login redirect (default: 8721)
   -v, --verbose           Show more logging
 ```
@@ -240,10 +241,15 @@ python strava_export.py --limit 10
 The script isn't the bottleneck - Strava is. A new API app is allowed only
 **100 requests every 15 minutes** and **1000 per day**. Each activity needs one
 or two requests, so if you have a thousand-plus activities, a full export simply
-can't finish in a single day. That's a Strava rule, not a bug, and running it in
-parallel wouldn't help - you'd just spend the time waiting for the quota anyway.
+can't finish in a single day. That's a Strava rule, not a bug - once you're up
+against the quota, no amount of parallelism buys you anything.
 
 The script handles this for you:
+
+- **It downloads several activities at once.** Below the quota the wait is all
+  network, so four requests in flight (`--workers`) finish an export several
+  times faster. Strava counts requests, not connections, so this doesn't burn
+  any extra quota.
 
 - **It remembers what it already downloaded.** When the daily limit runs out, it
   stops cleanly, writes the file with whatever it has so far, and tells you to

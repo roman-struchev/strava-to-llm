@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+# Unbuffered stdout so `docker logs` shows request/rate-limit lines as they happen.
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
 
 COPY requirements.txt .
